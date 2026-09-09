@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pellet-support"
+version = "0.1.0"
+description = "Close-packed spherical pellet support generator for large-format FDM"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+keywords = ["3d-printing", "support", "pellet", "close-packing", "fdm", "slicer"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering",
+]
+# trimesh 는 포맷·기능별 의존성을 전부 선택 설치로 둬서, 기본 설치만으로는
+# 3MF 로딩(networkx, lxml), 단면 폴리곤 복원(scipy, rtree), 폴리곤 삼각분할
+# (mapbox-earcut) 이 하나씩 순서대로 ModuleNotFoundError 로 죽는다.
+# 하나씩 쫓아다니는 대신 trimesh 가 자체적으로 묶어 둔 "easy" 번들을 그대로 쓴다.
+dependencies = [
+    "trimesh[easy]>=4.0",
+    "shapely>=2.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+preview = ["matplotlib>=3.5"]
+web = ["flask>=3.0"]
+dev = ["pytest>=7", "matplotlib>=3.5", "flask>=3.0"]
+
+[project.scripts]
+pellet-support = "pellet_support.cli:main"
+pellet-support-web = "pellet_support.webapp:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pellet_support = ["templates/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
