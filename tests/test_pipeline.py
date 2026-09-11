@@ -188,6 +188,31 @@ def test_missing_triangulation_engine_is_explained(monkeypatch, table_mesh):
     assert "mapbox-earcut" in str(ei.value)
 
 
+def test_solid_first_layer_does_not_orphan_the_bead_layer_above_it(table_mesh):
+    """통판 첫 층 위에 앉은 첫 구슬 층이 '떠 있다'고 오판되면 안 된다.
+
+    solid_first_layers 로 첫 층을 beads 없는 통판으로 깔면, 연결성 검사가
+    _bead_points 만 보고 그 층에서 점을 하나도 못 뽑는다. 스티칭
+    (stitch_floating)이 그 구멍을 우연히 메워 주지만, 그게 꺼져 있거나
+    (실패하거나 scipy 가 없어서) 실행되지 않으면 prune_unsupported_beads 가
+    통판 바로 위 첫 구슬 층 전체를 '아래에 아무것도 없다'로 지우고, 그 위로
+    전체가 연쇄적으로 무너진다(실측: 구슬 10만개 이상 전부 삭제).
+    """
+    contact, body = make_params(nozzle_diameter_mm=1.0)
+    gen = SupportGenParams(
+        nozzle_diameter_mm=1.0,
+        layer_height_mm=contact.layer_height_mm(),
+        solid_first_layers=1,
+        stitch_floating=False,
+    )
+    result = generate_support(table_mesh, gen, contact, body, detail=0, verbose=False)
+    assert result.plan is not None
+    solid_layer, first_bead_layer = result.plan.layers[0], result.plan.layers[1]
+    assert solid_layer["solid"] is not None
+    assert len(first_bead_layer["beads"]) > 100
+    assert sum(len(l["beads"]) for l in result.plan.layers) > 1000
+
+
 def test_3mf_export_does_not_require_manually_installing_extra_packages():
     """trimesh[easy] 번들 하나로 3MF 왕복(로드+저장)이 전부 되는지 확인.
 
