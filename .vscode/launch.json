@@ -1,0 +1,30 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "웹 UI 실행 (브라우저 자동 열림)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pellet_support.webapp",
+      "args": [],
+      "console": "integratedTerminal",
+      "justMyCode": true
+    },
+    {
+      "name": "웹 UI 실행 (자동 새로고침)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pellet_support.webapp",
+      "args": ["--debug", "--no-browser"],
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "CLI: 현재 열린 파일에 서포터 생성",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pellet_support.cli",
+      "args": ["${file}", "--nozzle", "1.0", "--preview", "-1"],
+      "console": "integratedTerminal"
+    }
+  ]
+}

@@ -133,23 +133,23 @@ def _generate_tree_support(
 ) -> "SupportResult":
     """나뭇가지 골격을 만들고 그것을 구슬로 표현한다.
 
-    단계별 실측(배/무한큐브/나뭇가지 거치대):
-
-    - 접촉점 52~317개 -> 병합 후 루트(트렁크) 7~49개
-    - 구슬 수: 기존 격자 방식 대비 배 698->414, 큐브 13,372->1,038,
-      거치대는 격자 방식이 227만개를 요구해 아예 불가능했던 것이 2,583개
-    - 모델 관통 0개
+    접촉점 -> 기울기 한계 안에서 V 자 병합하며 성장(베드 도달 가능 영역 회피)
+    -> 트렁크 굵기(짐 + 세장비) -> 최밀충전 구슬 다발 -> 이웃 트렁크 연결
+    -> 3D 관통 정리 -> 구조 점검(연결 덩어리, 받침 없는 구슬).
     """
     import math as _math
 
     from shapely.geometry import Polygon as _Polygon
 
     from .skeleton import (
+        add_bracing,
         assign_hierarchical_radii,
         extract_contact_points,
-        fix_residual_collisions,
         grow_branches,
+        prune_floating,
+        settle_collisions,
         skeleton_to_bead_seeds,
+        structure_report,
     )
 
     heights = [z0 + (i + 0.5) * det_h for i in range(len(det_slices))]
@@ -176,32 +176,64 @@ def _generate_tree_support(
     if not contacts:
         return SupportResult(trimesh.Trimesh(), None, det_slices)
 
-    z_off = 0.5 * contact_params.bead_diameter_mm + gen.contact_z_gap_mm
+    d_contact = contact_params.bead_diameter_mm
+    d_body = body_params.bead_diameter_mm
+    z_off = 0.5 * d_contact + gen.contact_z_gap_mm
     skeleton = grow_branches(
         contacts, det_slices, heights, gen,
-        step_h=max(det_h * 3, contact_params.bead_diameter_mm * 0.5),
-        merge_distance=gen.branch_merge_distance_mm
-                       or contact_params.bead_diameter_mm * 6,
+        step_h=max(det_h * 3, d_contact * 0.5),
+        merge_distance=gen.branch_merge_distance_mm or d_contact * 6,
         max_branch_angle_deg=gen.branch_angle_deg,
         contact_z_offset=z_off,
+        bead_radius=0.5 * max(d_contact, d_body),
     )
+    roots = skeleton.roots()
+    n_bed = sum(1 for r in roots if skeleton.nodes[r].on_bed)
+    n_model = sum(1 for r in roots if skeleton.nodes[r].on_model)
     if verbose:
-        print(f"      골격: {skeleton.summary()}, 트렁크 {len(skeleton.roots())}개")
+        print(f"      골격: {skeleton.summary()}")
+        print(f"      트렁크 {len(roots)}개 (베드 {n_bed} / 모델 윗면에 얹힘 {n_model})")
+        if skeleton.skipped_contacts:
+            print(f"      ! 베드에 너무 가까워 구슬이 못 들어가는 접촉점 "
+                  f"{skeleton.skipped_contacts}개는 건너뜀")
+        if skeleton.blocked_contacts:
+            print(f"      ! 벽에 너무 붙어 구슬 둘 자리가 없는 접촉점 "
+                  f"{skeleton.blocked_contacts}개는 건너뜀")
 
     if gen.adaptive_bead_size:
         assign_hierarchical_radii(
-            skeleton, contact_params.bead_diameter_mm,
-            body_params.bead_diameter_mm)
+            skeleton, d_contact, d_body,
+            max_trunk_diameter_mm=gen.tree_max_trunk_diameter_mm,
+            slenderness=gen.tree_trunk_slenderness)
 
     seeds = skeleton_to_bead_seeds(
-        skeleton, contact_params.bead_diameter_mm,
-        body_params.bead_diameter_mm,
+        skeleton, d_contact, d_body,
         model_slices=det_slices, heights=heights,
         xy_clearance=gen.xy_clearance_mm,
+        max_branch_angle_deg=gen.branch_angle_deg,
+        include_on_model=not gen.support_on_build_plate_only,
     )
-    seeds = fix_residual_collisions(seeds, mesh, gen.xy_clearance_mm)
+    if gen.tree_bracing:
+        braces, n_ties, n_braces = add_bracing(
+            skeleton, d_body, det_slices, heights, gen.xy_clearance_mm,
+            max_distance_mm=gen.tree_brace_distance_mm,
+            brace_angle_deg=min(35.0, gen.overhang_angle_deg))
+        seeds = seeds + braces
+        if verbose:
+            print(f"      트렁크 연결: 베드 연결 {n_ties}개, X 가새 {n_braces}쌍")
+    seeds, n_drop = settle_collisions(
+        seeds, mesh, gen.xy_clearance_mm, z_gap=gen.contact_z_gap_mm,
+        model_slices=det_slices, heights=heights)
+    seeds, n_float = prune_floating(seeds, mesh, z0, gen.xy_clearance_mm)
+    n_drop += n_float
     if verbose:
-        print(f"      구슬 {len(seeds)}개")
+        print(f"      구슬 {len(seeds)}개" +
+              (f" (모델과 겹치거나 떨어져 나가 뺀 구슬 {n_drop}개)" if n_drop else ""))
+        rep = structure_report(seeds, bed_z=z0)
+        print(f"      구조 점검: 연결 덩어리 {rep['components']}개, "
+              f"베드에 안 이어진 구슬 {rep['floating_beads']}개"
+              f"(모델 윗면에 얹힌 가지 포함), "
+              f"아래 받침 없는 구슬 {rep['unsupported_beads']}개")
 
     limit = gen.max_beads if gen.max_beads else bead_budget(detail)
     guard_bead_count(len(seeds), min(limit, bead_budget(detail)))

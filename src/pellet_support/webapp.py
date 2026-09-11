@@ -170,6 +170,8 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
             min_bead_to_nozzle_ratio=form["min_bead_ratio"],
             allow_internal_supports=form["allow_internal_supports"],
             tree_enabled=form["tree_enabled"],
+            tree_trunk_slenderness=form["trunk_slenderness"],
+            tree_bracing=form["tree_bracing"],
             fallback_solid=not form["no_fallback_solid"],
             max_layers=form["max_layers"],
         )
@@ -332,6 +334,8 @@ def api_generate():
         min_bead_ratio=_form_float("min_bead_ratio", 0.35),
         allow_internal_supports=_form_bool("allow_internal_supports"),
         tree_enabled=_form_bool("tree_enabled"),
+        trunk_slenderness=_form_float("trunk_slenderness", 8.0),
+        tree_bracing=request.form.get("tree_bracing", "1") not in ("0", "false", ""),
         no_fallback_solid=_form_bool("no_fallback_solid"),
         max_layers=_form_int("max_layers", 4000),
         with_model=_form_bool("with_model"),
