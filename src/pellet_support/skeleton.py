@@ -1215,18 +1215,35 @@ def fix_residual_collisions(
         D = np.array([d for x, y, z, d in out])
         closest = np.empty_like(P)
         dist = np.empty(len(P))
+        surface_normals = np.empty_like(P)
         inside = np.zeros(len(P), dtype=bool)
         for s in range(0, len(P), chunk):
             e = min(s + chunk, len(P))
             c_, d_, _t = pq.on_surface(P[s:e])
             closest[s:e] = c_
             dist[s:e] = d_
+            surface_normals[s:e] = probe.face_normals[_t]
             # on_surface 는 '부호 없는' 거리를 준다. 모델 **안쪽** 깊숙이
             # 있는 구슬은 표면까지 멀어서 오히려 안전해 보인다(실측: 상자
             # 한가운데 구슬이 표면까지 10mm 라 통과해 버렸다).
             # 안/밖을 따로 판정해야 한다.
             inside[s:e] = pq.signed_distance(P[s:e]) > 0
         need_r = 0.5 * D + xy_clearance
+        # 모델 윗면에 실제로 앉은 구슬은 XY 여유만큼 위로 띄우면 안 된다.
+        # 반지름과의 거리 차이가 수치 오차 수준인 접촉만 인정하고, 위를
+        # 향한 면의 법선과 실제 접촉 방향이 일치해야 한다. 모서리 옆이나
+        # 벽 근처에 떠 있는 구슬은 최근접 면이 위를 향해도 착지가 아니다.
+        outward = P - closest
+        alignment = np.einsum("ij,ij->i", outward, surface_normals) / np.maximum(dist, 1e-9)
+        contact_tolerance = np.minimum(1e-3, 0.01 * D)
+        on_model_surface = (
+            ~inside
+            & (np.abs(dist - 0.5 * D) <= contact_tolerance)
+            & (outward[:, 2] > 1e-8)
+            & (surface_normals[:, 2] > 1e-8)
+            & (alignment >= 1.0 - 1e-4)
+        )
+        need_r = np.where(on_model_surface, 0.5 * D, need_r)
         if z_gap is not None:
             # 바로 위에서 내려다보는 오버행 면과의 간격은 XY 여유가 아니라
             # z 간격(contact_z_gap)으로 본다. 모든 방향을 XY 여유로 재면
@@ -1350,33 +1367,14 @@ def _touch_components(X, R, touch: float = 0.98):
 
 
 def prune_floating(seeds, mesh, bed_z: float, xy_clearance: float):
-    """베드에도, 모델 윗면에도 얹혀 있지 않은 구슬 덩어리를 뺀다.
+    """실제 받침에서 아래→위 순서로 연결되지 않는 구슬을 뺀다.
 
-    관통 정리에서 옆으로 조금 밀린 구슬은 이웃과 0.01~0.05mm 차이로 떨어질
-    수 있다(실측: 줄기 옆 접촉 구슬 2개짜리 덩어리 8개). 이런 덩어리는
-    출력하면 허공에 찍혀 늘어지기만 한다. 반환: (구슬, 뺀 개수).
+    XY 여유는 바닥의 공중 간격이 아니다. 벽에 가깝거나 위쪽으로만
+    연결된 구슬을 모델 위에 착지한 것으로 인정하지 않는다.
+    ``xy_clearance`` 인자는 기존 호출 호환을 위해 유지한다.
     """
     if not seeds:
         return seeds, 0
-    A = np.asarray(seeds, dtype=float)
-    X, R = A[:, :3], 0.5 * A[:, 3]
-    n_comp, lab = _touch_components(X, R)
-    grounded = np.zeros(n_comp, dtype=bool)
-    grounded[np.unique(lab[(X[:, 2] - R) <= bed_z + 0.05])] = True
-    lows = []
-    for c in np.where(~grounded)[0]:
-        idx = np.where(lab == c)[0]
-        lows.append((c, idx[np.argmin(X[idx, 2])]))
-    if lows and mesh is not None:
-        import trimesh as _trimesh
-        pq = _trimesh.proximity.ProximityQuery(mesh)
-        P = X[[i for _, i in lows]]
-        closest, dist, _t = pq.on_surface(P)
-        for (c, i), cp, d in zip(lows, closest, dist):
-            # 가장 낮은 구슬 바로 아래(수직에 가까운 방향)에 모델 표면이 있으면
-            # 모델 윗면에 얹힌 가지다.
-            below = cp[2] < X[i, 2] - 0.3 * R[i]
-            if below and d <= R[i] + xy_clearance + 1.0:
-                grounded[c] = True
-    keep = grounded[lab]
+    from .printability import supported_mask
+    keep = supported_mask(seeds, mesh, bed_z)
     return [s for s, k in zip(seeds, keep) if k], int((~keep).sum())

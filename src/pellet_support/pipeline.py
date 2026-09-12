@@ -216,8 +216,17 @@ def _generate_tree_support(
     seeds, _ = settle_collisions(seeds, mesh, gen.xy_clearance_mm,
                                 z_gap=gen.contact_z_gap_mm,
                                 model_slices=det_slices, heights=heights)
+    from .printability import repair_support_paths
+    report_progress("아래 받침 연결 보완")
+    seeds, repaired = repair_support_paths(
+        seeds, mesh, z0, body_params.bead_diameter_mm, gen.xy_clearance_mm,
+        z_gap=gen.contact_z_gap_mm, max_beads=limit,
+        allow_model=not gen.support_on_build_plate_only,
+        progress_callback=progress_callback,
+    )
     report_progress("떠 있는 구슬 정리")
-    seeds, _ = prune_floating(seeds, mesh, z0, gen.xy_clearance_mm)
+    seeds, unsupported = prune_floating(
+        seeds, None if gen.support_on_build_plate_only else mesh, z0, gen.xy_clearance_mm)
     if verbose:
         print(f"      구슬 {len(seeds)}개")
     if not seeds:
@@ -235,7 +244,8 @@ def _generate_tree_support(
         distances, _ = cKDTree([seed[:3] for seed in seeds]).query(tip_nodes)
         supported = int((distances <= contact_params.bead_diameter_mm * 0.6).sum())
     plan.tree_stats = dict(requested_contacts=len(contacts), supported_contacts=supported,
-                           roots=len(skeleton.roots()), contact_spacing_mm=spacing)
+                           roots=len(skeleton.roots()), contact_spacing_mm=spacing,
+                           repaired_beads=repaired, removed_unsupported_beads=unsupported)
     if supported < len(contacts):
         warnings.warn(f"선택한 접점 {len(contacts)}개 중 {len(contacts) - supported}개는 "
                       "최종 비드에 연결되지 않았습니다. 지지 누락을 확인하세요.", stacklevel=2)
