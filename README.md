@@ -104,19 +104,20 @@ VS Code 에서는 좌측 **실행 및 디버그** 패널에서 `웹 UI 실행` �
 ## 명령줄로 쓰기
 
 ```bash
-# 가장 단순한 실행 — 노즐 지름만 주면 나머지는 자동
+# 가장 단순한 실행 — 노즐 지름만 주면 나머지는 자동(기본은 트리 골격 방식)
 pellet-support model.stl --nozzle 1.0
 
-# 미리보기 + 합본 + 좌표 덤프
-pellet-support model.3mf --nozzle 1.2 --overlap 0.06 \
+# 미리보기 + 합본 + 좌표 덤프. pitch·배위수 같은 격자 지표를 보려면
+# --no-tree 로 기존 격자 채움 방식을 켜야 합니다(트리 방식엔 없는 지표입니다).
+pellet-support model.3mf --nozzle 1.2 --overlap 0.06 --no-tree \
     --preview -1 --with-model --dump-json
 
 # 테스트 모델 만들어 보기
 python examples/make_test_models.py
-pellet-support examples/out/table.stl --nozzle 1.0 --preview -1
+pellet-support examples/out/table.stl --nozzle 1.0 --no-tree --preview -1
 ```
 
-실행하면 이런 출력이 나옵니다.
+`--no-tree`(격자 채움 방식)로 실행하면 이런 출력이 나옵니다.
 
 ```
 [2/4] 충전 기하
@@ -155,6 +156,7 @@ pellet-support examples/out/table.stl --nozzle 1.0 --preview -1
 
 | 옵션 | 기본값 | 설명 |
 |------|--------|------|
+| `--no-tree` | (트리 켜짐) | 나뭇가지 골격 대신 기존 격자 채움 방식을 씀 |
 | `--nozzle` | 1.0 | 서포터 익스트루더 노즐 지름 (압출 최소 크기 기준) |
 | `--bead-diameter` | 노즐×0.5 | 구슬 지름. 노즐보다 작게 잡을수록 gap/interface 사각지대가 줄지만 인쇄 시간은 늘어남 |
 | `--overlap` | 0.08 | delta. 이웃과 눌리는 정도 |
@@ -409,8 +411,12 @@ pellet-support model.3mf --nozzle 5 --auto
 Overhang 분석 -> 접촉점 추출 -> 가지 성장/병합 -> 충돌 검증 -> Bead 변환
 ```
 
-`--tree`(CLI) 또는 웹 UI 체크박스로 켭니다. 기본값은 꺼짐이라 기존 동작은
-그대로입니다.
+**CLI와 웹 UI 모두 기본값입니다.** 나뭇가지처럼 가늘고 갈라진 오버행을
+격자 방식으로 채우면 곳곳의 작은 오버행 섬이 아래로 내려가며 flare 로
+넓어지다 서로 뭉쳐서, 원래 형상과 무관한 거대한 덩어리가 나올 수 있습니다
+(가지가 복잡하게 얽힌 모델일수록 심합니다). `--no-tree`(CLI) 또는 웹 UI
+체크박스 해제로 기존 격자 방식으로 되돌릴 수 있고, 상판처럼 넓고 평평한
+오버행에는 격자 방식이 더 촘촘하게 받쳐줍니다.
 
 ### 실측 비교 (노즐 5mm, 관통 모두 0개)
 

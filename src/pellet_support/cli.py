@@ -87,10 +87,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interactive", "-i", action="store_true",
                    help="노즐 지름 · 구슬 지름을 명령줄 대신 터미널에서 "
                         "직접 물어본다. 다른 옵션은 그대로 --옵션 으로 줄 수 있다")
-    s.add_argument("--tree", action="store_true",
-                   help="나뭇가지(트리) 골격 방식. 영역을 채우는 대신 접촉점->"
+    s.add_argument("--tree", dest="tree", action="store_true", default=True,
+                   help="나뭇가지(트리) 골격 방식(기본값). 영역을 채우는 대신 접촉점->"
                         "가지->병합->베드 골격을 먼저 만들고 구슬로 표현한다. "
                         "구슬 수가 훨씬 적다(실측: 무한 큐브 13,372->1,038개)")
+    s.add_argument("--no-tree", dest="tree", action="store_false",
+                   help="트리 대신 기존 격자 채움 방식을 쓴다. 나뭇가지처럼 "
+                        "가늘고 갈라진 오버행이 아니라 상판처럼 넓고 평평한 "
+                        "오버행에는 격자 방식이 더 촘촘하게 받쳐준다")
     s.add_argument("--trunk-slenderness", type=float, default=8.0,
                    help="트리 모드 트렁크 세장비 상한(높이/굵기). 트렁크가 아래로 "
                         "갈수록 이 비율로 굵어지는 구슬 다발이 된다. 작을수록 튼튼하고 "
