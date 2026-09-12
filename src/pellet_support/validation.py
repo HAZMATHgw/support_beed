@@ -128,6 +128,16 @@ def validate_gen_params(gen: SupportGenParams) -> None:
         f"음수면 서포터가 모델 안으로 파고듭니다.",
     )
     _require(
+        gen.tree_trunk_slenderness > 0,
+        f"트렁크 세장비 상한이 {gen.tree_trunk_slenderness} 입니다. 0보다 커야 합니다"
+        f"(권장 5~12, 작을수록 굵고 튼튼).",
+    )
+    _require(
+        gen.tree_brace_distance_mm is None or gen.tree_brace_distance_mm > 0,
+        f"트렁크 연결 최대 거리가 {gen.tree_brace_distance_mm}mm 입니다. "
+        f"0보다 커야 합니다(비우면 자동).",
+    )
+    _require(
         gen.brim_mm >= 0,
         f"바닥 브림 폭이 음수입니다({gen.brim_mm}).",
     )

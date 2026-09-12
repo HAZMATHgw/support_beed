@@ -270,8 +270,17 @@
           </select>
         </div>
         <div class="check">
-          <input type="checkbox" id="tree_enabled">
+          <input type="checkbox" id="tree_enabled" checked>
           <label for="tree_enabled">나뭇가지(트리) 골격 방식 — 구슬 수가 훨씬 적음</label>
+        </div>
+        <div class="check">
+          <input type="checkbox" id="tree_bracing" checked>
+          <label for="tree_bracing">트리: 이웃 트렁크끼리 베드 연결 + X 가새로 잇기</label>
+        </div>
+        <div class="row">
+          <label for="trunk_slenderness">트리: 트렁크 세장비 상한
+            <span class="hint">높이/굵기. 작을수록 굵고 튼튼(기본 8)</span></label>
+          <input type="number" id="trunk_slenderness" value="8" step="0.5" min="2" max="40">
         </div>
         <div class="check">
           <input type="checkbox" id="no_fallback_solid">
@@ -497,11 +506,12 @@ $('go').addEventListener('click', async () => {
   const fd = new FormData();
   fd.append('model', picked);
   ['nozzle','bead_diameter','min_bead_ratio','overlap','lateral_overlap','vertical_overlap','stagger_period','overhang_angle','xy_clearance',
-   'z_gap_layers','contact_layers','body_bead_ratio','sphere_detail','format']
+   'z_gap_layers','contact_layers','body_bead_ratio','sphere_detail','format','trunk_slenderness']
     .forEach(k => fd.append(k, $(k).value));
   fd.append('straight_columns', $('straight_columns').checked ? '1' : '0');
   fd.append('auto_tune', $('auto_tune').checked ? '1' : '0');
   fd.append('tree_enabled', $('tree_enabled').checked ? '1' : '0');
+  fd.append('tree_bracing', $('tree_bracing').checked ? '1' : '0');
   fd.append('no_fallback_solid', $('no_fallback_solid').checked ? '1' : '0');
   fd.append('allow_internal_supports',
             $('allow_internal_supports').checked ? '1' : '0');
