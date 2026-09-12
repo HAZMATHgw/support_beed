@@ -35,13 +35,13 @@ MESH_EXTS = (".stl", ".obj", ".3mf", ".ply", ".off")
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="pellet-support",
-        description="3D 모델 -> 최밀충전 구형 펠릿 서포터",
+        description="3D 모델 -> 접점과 가지를 합치는 트리형 구슬 서포터 (기본)",
     )
     ap.add_argument("input", help="입력 모델 (stl/obj/3mf/ply/off)")
     ap.add_argument("-o", "--output", default=None)
 
     g = ap.add_argument_group("충전 기하")
-    g.add_argument("--nozzle", type=float, default=1.0,
+    g.add_argument("--nozzle", type=float, default=0.4,
                    help="노즐 지름 (mm). 압출 가능한 최소 크기의 기준")
     g.add_argument("--bead-diameter", type=float, default=None,
                    help="구슬 지름 (mm). 비우면 노즐 지름의 절반. "
@@ -87,10 +87,21 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--interactive", "-i", action="store_true",
                    help="노즐 지름 · 구슬 지름을 명령줄 대신 터미널에서 "
                         "직접 물어본다. 다른 옵션은 그대로 --옵션 으로 줄 수 있다")
-    s.add_argument("--tree", action="store_true",
-                   help="나뭇가지(트리) 골격 방식. 영역을 채우는 대신 접촉점->"
-                        "가지->병합->베드 골격을 먼저 만들고 구슬로 표현한다. "
-                        "구슬 수가 훨씬 적다(실측: 무한 큐브 13,372->1,038개)")
+    mode = s.add_mutually_exclusive_group()
+    mode.add_argument("--tree", dest="tree", action="store_true",
+                      help="나뭇가지(트리) 골격 방식 (기본). 접점을 성기게 골라 "
+                           "가지를 합치며 내려가 구슬 수를 줄인다")
+    mode.add_argument("--no-tree", "--grid", dest="tree", action="store_false",
+                      help="트리 대신 기존 격자 충전 방식으로 서포터 영역을 채운다")
+    ap.set_defaults(tree=True)
+    s.add_argument("--tree-contact-spacing", type=float, default=None, metavar="MM",
+                   help="트리 접점 간격 (mm). 비우면 구슬 지름의 4배. "
+                        "키울수록 접점과 구슬 수가 줄어든다")
+    s.add_argument("--branch-angle", type=float, default=25.0, metavar="DEG",
+                   help="트리 가지의 최대 기울기 (수직 기준, 기본 25도)")
+    s.add_argument("--branch-merge-distance", type=float, default=None, metavar="MM",
+                   help="트리 가지를 병합할 최대 수평 거리 (mm). "
+                        "비우면 구슬 지름의 6배")
     s.add_argument("--build-plate-only", action="store_true")
     s.add_argument("--allow-internal-supports", action="store_true",
                    help="모델 내부의 닫힌 공동에도 서포터를 채움 "
@@ -166,10 +177,9 @@ def _run_interactive_prompts(args) -> None:
     args.bead_diameter = _prompt_float(
         "구슬 지름(mm) — 비우면 노즐의 절반으로 자동",
         default=args.bead_diameter, allow_empty=True)
-    if not args.tree:
-        args.tree = _prompt_bool(
-            "나뭇가지(트리) 골격 방식을 쓸까요? — 구슬 수가 훨씬 적음",
-            default=True)
+    args.tree = _prompt_bool(
+        "나뭇가지(트리) 골격 방식을 쓸까요? — 접점과 구슬 수를 줄임",
+        default=args.tree)
     if not args.with_model:
         args.with_model = _prompt_bool(
             "모델과 서포터를 합친 파일도 함께 받을까요?",
@@ -210,6 +220,9 @@ def _run(argv=None) -> int:
         support_on_build_plate_only=args.build_plate_only,
         allow_internal_supports=args.allow_internal_supports,
         tree_enabled=args.tree,
+        tree_contact_spacing_mm=args.tree_contact_spacing,
+        branch_angle_deg=args.branch_angle,
+        branch_merge_distance_mm=args.branch_merge_distance,
         fallback_solid=not args.no_fallback_solid,
         max_layers=args.max_layers,
         max_beads=args.max_beads,

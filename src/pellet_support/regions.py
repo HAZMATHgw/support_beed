@@ -165,6 +165,26 @@ def _inaccessible_cavities(slices, opening_mm: float, passes: int = 3):
     return result
 
 
+def detect_overhangs(slices: Sequence, params: SupportGenParams, detection_h: float,
+                     exclude_inaccessible: bool = True) -> List:
+    """격자/트리가 공유하는 오버행 판정. 트리는 접점 생성 전에 공동을 뺀다."""
+    step = detection_h / math.tan(math.radians(params.overhang_angle_deg))
+    result = [Polygon()] * len(slices)
+    sealed = None
+    if exclude_inaccessible and not params.allow_internal_supports:
+        sealed = _inaccessible_cavities(slices, params.removal_opening_mm)
+    for i in range(1, len(slices)):
+        cur, below = clean(slices[i]), clean(slices[i - 1])
+        if cur.is_empty:
+            continue
+        region = cur.difference(below.buffer(step)) if not below.is_empty else cur
+        if sealed is not None and not sealed[i - 1].is_empty:
+            # 천장 단면은 실체이므로, 바로 아래 빈 공간의 접근성을 검사한다.
+            region = region.difference(sealed[i - 1])
+        result[i] = drop_small(region, params.min_island_area_mm2)
+    return result
+
+
 def build_support_regions(
     slices: Sequence, params: SupportGenParams, detection_h: float = None
 ) -> Tuple[List, List]:
@@ -192,14 +212,7 @@ def build_support_regions(
         params.contact_layers * params.layer_height_mm / det_h)))
 
     # (1) 아래가 비어 있는 영역 = 오버행
-    overhang: List = [Polygon()] * n
-    for i in range(1, n):
-        cur, below = clean(slices[i]), clean(slices[i - 1])
-        if cur.is_empty:
-            continue
-        grown = below.buffer(step) if not below.is_empty else Polygon()
-        oh = cur.difference(grown) if not grown.is_empty else cur
-        overhang[i] = drop_small(oh, params.min_island_area_mm2)
+    overhang = detect_overhangs(slices, params, det_h, exclude_inaccessible=False)
 
     # (2) 위에서 아래로 누적하며 기둥을 만든다
     support: List = [Polygon()] * n

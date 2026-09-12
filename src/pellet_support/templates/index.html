@@ -73,6 +73,7 @@
        font-size:13px;border:1px solid var(--line);border-radius:3px;
        background:var(--panel);color:var(--ink)}
   input[type=checkbox]{width:16px;height:16px;accent-color:var(--body)}
+  input:disabled{background:var(--field);color:var(--muted)}
   .check{display:flex;gap:8px;align-items:center;padding:8px 0;font-size:13.5px}
   :focus-visible{outline:2px solid var(--body);outline-offset:2px}
   details{margin-top:8px}
@@ -131,11 +132,11 @@
 <div class="wrap">
 
 <header>
-  <div class="eyebrow">최밀충전 · 배위수 12</div>
+  <div class="eyebrow">트리 서포터 · 성긴 접점과 가지 병합</div>
   <h1>펠릿 서포터 생성기</h1>
-  <p>모델 파일을 올리면 오버행 아래에 구슬을 최밀충전으로 쌓은 서포터를 만들어
-     같은 형식으로 되돌려줍니다. 구슬은 아래 세 구가 만드는 오목한 자리에 앉으므로
-     <b>층높이는 선택할 수 없고 충전 기하에서 강제로 정해집니다.</b></p>
+  <p>모델 파일을 올리면 필요한 접점을 골라 가지로 연결한 구슬 서포터를 만들어
+     같은 형식으로 되돌려줍니다. 접점 간격을 키우면 받치는 위치와 구슬 수가 줄어듭니다.
+     <b>출력할 때는 표시된 프로파일 층높이를 사용하세요.</b></p>
 </header>
 
 <div class="grid">
@@ -179,7 +180,7 @@
       <div class="row">
         <label for="nozzle">노즐 지름
           <span class="hint">압출 가능한 최소 크기의 기준</span></label>
-        <input type="number" id="nozzle" value="1.0" step="0.1" min="0.2">
+        <input type="number" id="nozzle" value="0.4" step="0.1" min="0.2">
       </div>
       <div class="check">
         <input type="checkbox" id="auto_tune" checked>
@@ -187,7 +188,7 @@
       </div>
       <div class="row">
         <label for="bead_diameter">구슬 지름
-          <span class="hint" id="beadHint">비우면 노즐의 절반 (0.50mm)</span></label>
+          <span class="hint" id="beadHint">비우면 노즐의 절반 (0.20mm)</span></label>
         <input type="number" id="bead_diameter" value="" step="0.1" min="0"
                placeholder="자동">
       </div>
@@ -227,8 +228,31 @@
         <label for="straight_columns">구슬을 수직 기둥으로 쌓기 (배위수 8)</label>
       </div>
 
+      <div class="check">
+        <input type="checkbox" id="tree_enabled" checked>
+        <label for="tree_enabled">나뭇가지(트리) 골격 방식 — 끄면 기존 격자 충전</label>
+      </div>
+      <div class="row">
+        <label for="tree_contact_spacing">트리 접점 간격 (mm)
+          <span class="hint" id="treeSpacingHint">비우면 구슬 지름의 4배</span>
+          <span class="hint">크게 설정할수록 접점과 구슬 수가 줄어듭니다</span></label>
+        <input type="number" id="tree_contact_spacing" value="" step="any" min="0.001"
+               placeholder="자동">
+      </div>
+
       <details>
         <summary>서포터 영역 설정</summary>
+        <div class="row">
+          <label for="branch_angle">트리 가지 최대 각도 (°)
+            <span class="hint">수직 기준 · 기본 25°</span></label>
+          <input type="number" id="branch_angle" value="25" step="any" min="0" max="89.9">
+        </div>
+        <div class="row">
+          <label for="branch_merge_distance">트리 가지 병합 거리 (mm)
+            <span class="hint" id="treeMergeHint">비우면 구슬 지름의 6배</span></label>
+          <input type="number" id="branch_merge_distance" value="" step="any" min="0.001"
+                 placeholder="자동">
+        </div>
         <div class="row">
           <label for="overhang_angle">오버행 각도
             <span class="hint">수평 기준 이보다 완만하면 지지</span></label>
@@ -268,10 +292,6 @@
             <option value=".3mf">.3mf</option>
             <option value=".obj">.obj</option>
           </select>
-        </div>
-        <div class="check">
-          <input type="checkbox" id="tree_enabled">
-          <label for="tree_enabled">나뭇가지(트리) 골격 방식 — 구슬 수가 훨씬 적음</label>
         </div>
         <div class="check">
           <input type="checkbox" id="no_fallback_solid">
@@ -385,6 +405,10 @@ function render(){
   $('beadHint').textContent = $('bead_diameter').value.trim()
     ? `직접 지정함 (자동값은 ${autoBead.toFixed(2)}mm)`
     : `비우면 노즐의 절반 (${autoBead.toFixed(2)}mm)`;
+  $('treeSpacingHint').textContent =
+    `비우면 구슬 지름의 4배 (현재 ${(g.D * 4).toFixed(2)}mm · 자동 선택 시 다시 계산)`;
+  $('treeMergeHint').textContent =
+    `비우면 구슬 지름의 6배 (현재 ${(g.D * 6).toFixed(2)}mm · 자동 선택 시 다시 계산)`;
   $('o-layer').innerHTML = g.layerH.toFixed(3) + '<small>mm</small>';
   $('o-pitch').innerHTML = g.pitch.toFixed(3) + '<small>mm</small>';
   $('o-disc').innerHTML = g.aniso
@@ -493,11 +517,17 @@ drop.addEventListener('drop', e => {
 $('go').addEventListener('click', async () => {
   const err = $('err'); err.style.display = 'none';
   if(!picked){ err.textContent = '먼저 모델 파일을 올려주세요.'; err.style.display='block'; return; }
+  if($('tree_enabled').checked){
+    for(const id of ['tree_contact_spacing','branch_angle','branch_merge_distance']){
+      if(!$(id).reportValidity()) return;
+    }
+  }
 
   const fd = new FormData();
   fd.append('model', picked);
   ['nozzle','bead_diameter','min_bead_ratio','overlap','lateral_overlap','vertical_overlap','stagger_period','overhang_angle','xy_clearance',
-   'z_gap_layers','contact_layers','body_bead_ratio','sphere_detail','format']
+   'z_gap_layers','contact_layers','body_bead_ratio','sphere_detail','format',
+   'tree_contact_spacing','branch_angle','branch_merge_distance']
     .forEach(k => fd.append(k, $(k).value));
   fd.append('straight_columns', $('straight_columns').checked ? '1' : '0');
   fd.append('auto_tune', $('auto_tune').checked ? '1' : '0');
@@ -573,7 +603,11 @@ $('go').addEventListener('click', async () => {
     $('r-tri').textContent = data.triangles.toLocaleString();
     const c = data.measured ? data.measured.median_coordination : null;
     $('r-coord').textContent = c === null ? '—' : c;
-    $('r-note').textContent = (c !== null && c < 10)
+    $('r-note').textContent = data.tree_enabled
+      ? `트리 접점 간격 ${data.tree_contact_spacing_mm.toFixed(2)} mm · `
+        + `가지 최대 각도 ${data.branch_angle_deg}° · `
+        + `병합 거리 ${data.branch_merge_distance_mm.toFixed(2)} mm`
+      : (c !== null && c < 10)
       ? '측정 배위수가 낮습니다. 서포터 단면이 얇아 가장자리 구슬 비중이 크면 정상입니다. '
         + '넓은 면을 받치는데도 낮다면 층높이 설정을 확인하세요.'
       : '';
@@ -602,6 +636,13 @@ $('go').addEventListener('click', async () => {
 ['nozzle','bead_diameter','overlap','lateral_overlap','vertical_overlap',
  'stagger_period','straight_columns']
   .forEach(id => $(id).addEventListener('input', render));
+function updateTreeControls(){
+  ['tree_contact_spacing','branch_angle','branch_merge_distance'].forEach(id => {
+    $(id).disabled = !$('tree_enabled').checked;
+  });
+}
+$('tree_enabled').addEventListener('change', updateTreeControls);
+updateTreeControls();
 render();
 </script>
 </body>

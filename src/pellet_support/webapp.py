@@ -96,14 +96,16 @@ def _form_float(name: str, default: float) -> float:
         return default
 
 
-def _form_optional_float(name: str) -> Optional[float]:
-    """비어 있으면 None. make_params 의 자동 계산(노즐의 절반)을 쓰기 위함."""
+def _form_optional_float(name: str, *, strict: bool = False) -> Optional[float]:
+    """비어 있으면 None 으로 두어 파라미터의 자동 계산을 사용한다."""
     raw = request.form.get(name, "").strip()
     if not raw:
         return None
     try:
         return float(raw)
     except ValueError:
+        if strict:
+            raise InvalidParameterError(f"{name} 값은 숫자로 입력하거나 비워두세요.")
         return None
 
 
@@ -115,8 +117,9 @@ def _form_int(name: str, default: int) -> int:
         return default
 
 
-def _form_bool(name: str) -> bool:
-    return request.form.get(name, "").lower() in ("1", "true", "on", "yes")
+def _form_bool(name: str, default: bool = False) -> bool:
+    return request.form.get(name, "1" if default else "0").lower() in (
+        "1", "true", "on", "yes")
 
 
 @app.route("/")
@@ -170,6 +173,9 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
             min_bead_to_nozzle_ratio=form["min_bead_ratio"],
             allow_internal_supports=form["allow_internal_supports"],
             tree_enabled=form["tree_enabled"],
+            tree_contact_spacing_mm=form["tree_contact_spacing"],
+            branch_angle_deg=form["branch_angle"],
+            branch_merge_distance_mm=form["branch_merge_distance"],
             fallback_solid=not form["no_fallback_solid"],
             max_layers=form["max_layers"],
         )
@@ -255,6 +261,14 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
             volume_cm3=round(abs(result.mesh.volume) / 1000.0, 3),
             measured=stats,
             notes=notes,
+            tree_enabled=gen.tree_enabled,
+            tree_contact_spacing_mm=(gen.tree_contact_spacing_mm
+                                     if gen.tree_contact_spacing_mm is not None
+                                     else contact.bead_diameter_mm * 4.0),
+            branch_angle_deg=gen.branch_angle_deg,
+            branch_merge_distance_mm=(gen.branch_merge_distance_mm
+                                      if gen.branch_merge_distance_mm is not None
+                                      else contact.bead_diameter_mm * 6.0),
             auto_tuned=(None if tuning is None else {
                 "bead_diameter": round(tuning.chosen.bead_diameter_mm, 3),
                 "fillable": round(tuning.chosen.fillable_fraction, 3),
@@ -301,6 +315,13 @@ def api_generate():
                   f"{', '.join(MESH_EXTS)} 중 하나를 올려주세요."
         ), 400
 
+    try:
+        tree_contact_spacing = _form_optional_float("tree_contact_spacing", strict=True)
+        branch_angle = _form_optional_float("branch_angle", strict=True)
+        branch_merge_distance = _form_optional_float("branch_merge_distance", strict=True)
+    except InvalidParameterError as exc:
+        return jsonify(error=str(exc)), 400
+
     job = uuid.uuid4().hex[:12]
     workdir = tempfile.mkdtemp(prefix=f"pellet-{job}-")
     with _JOBS_LOCK:
@@ -317,7 +338,7 @@ def api_generate():
     # 꺼내둔다. 배경 스레드에서는 request 객체를 못 쓴다(스레드 로컬이라
     # 요청이 끝나면 사라진다).
     form = dict(
-        nozzle=_form_float("nozzle", 1.0),
+        nozzle=_form_float("nozzle", 0.4),
         bead_diameter=_form_optional_float("bead_diameter"),
         overlap=_form_float("overlap", 0.08),
         lateral_overlap=_form_optional_float("lateral_overlap"),
@@ -331,7 +352,10 @@ def api_generate():
         contact_layers=_form_int("contact_layers", 2),
         min_bead_ratio=_form_float("min_bead_ratio", 0.35),
         allow_internal_supports=_form_bool("allow_internal_supports"),
-        tree_enabled=_form_bool("tree_enabled"),
+        tree_enabled=_form_bool("tree_enabled", default=True),
+        tree_contact_spacing=tree_contact_spacing,
+        branch_angle=25.0 if branch_angle is None else branch_angle,
+        branch_merge_distance=branch_merge_distance,
         no_fallback_solid=_form_bool("no_fallback_solid"),
         max_layers=_form_int("max_layers", 4000),
         with_model=_form_bool("with_model"),

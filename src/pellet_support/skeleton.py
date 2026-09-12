@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import List, Literal, Optional, Sequence, Tuple
 
 import numpy as np
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon, box
 
 from .params import SupportGenParams
 from .slicing import clean
@@ -89,23 +89,19 @@ class SupportSkeleton:
                 f"말단(리프) {n_leaves}개, 최대 깊이 {depth}")
 
     def _max_depth(self) -> int:
-        if not self.nodes:
-            return 0
-        depth = [0] * len(self.nodes)
-        # 부모가 항상 인덱스상 나중에 추가되므로(위->아래로 성장), 자식 인덱스가
-        # 부모보다 항상 크다는 보장은 없다(병합 시 재부모 지정). 안전하게 반복.
-        changed = True
-        guard = 0
-        while changed and guard < len(self.nodes) + 5:
-            changed = False
-            guard += 1
-            for i, n in enumerate(self.nodes):
-                if n.parent is not None:
-                    want = depth[n.parent] + 1
-                    if want > depth[i]:
-                        depth[i] = want
-                        changed = True
-        return max(depth) if depth else 0
+        # 루트에서 한 번만 내려가면 O(노드 수). 전체 배열을 깊이만큼
+        # 반복 갱신하던 방식은 작은 비드/높은 모델에서 비용이 커진다.
+        deepest = 0
+        stack = [(idx, 0) for idx in self.roots()]
+        seen = set()
+        while stack:
+            idx, depth = stack.pop()
+            if idx in seen:
+                continue
+            seen.add(idx)
+            deepest = max(deepest, depth)
+            stack.extend((child, depth + 1) for child in self.children[idx])
+        return deepest
 
 
 @dataclass
@@ -122,50 +118,70 @@ def extract_contact_points(
     heights: Sequence[float],
     max_area_per_point: float,
     min_area: float = 0.5,
+    contact_spacing_mm: Optional[float] = None,
 ) -> List[ContactPoint]:
-    """층별 오버행 폴리곤에서 접촉점을 뽑는다.
+    """오버행을 일정 간격으로 샘플링하고 연속된 경사면의 반복 접점을 줄인다.
 
-    폴리곤 하나당 기본 1개(중심점)만 뽑되, 면적이 크면
-    ``max_area_per_point`` 기준으로 나눠서 여러 점을 뽑는다(넓은 오버행
-    하나를 접촉점 하나로 뭉치면 그 아래 가지 하나가 감당하기엔 실제 면적이
-    너무 커서, 이후 구슬 변환 단계에서 실제 접촉을 다 못 덮기 때문이다).
+    각 격자 셀과 실제 폴리곤의 교집합 안에서 점을 선택한다. 오목한 면과
+    좁은 섬도 누락하지 않는다. 이전 층과 이어지는 조각끼리만 접점을
+    공유하므로, 빈 층을 사이에 둔 별도 선반의 접점은 사라지지 않는다.
     """
+    spacing = contact_spacing_mm if contact_spacing_mm is not None else math.sqrt(max_area_per_point)
+    if not math.isfinite(spacing) or spacing <= 0:
+        raise ValueError("접점 간격은 유한한 양수여야 합니다.")
+    if len(overhang_regions) != len(heights):
+        raise ValueError("오버행 영역과 높이 수가 다릅니다.")
     points: List[ContactPoint] = []
+    previous = []
     for i, region in enumerate(overhang_regions):
         region = clean(region)
         if region.is_empty:
+            previous = []
             continue
         parts = region.geoms if hasattr(region, "geoms") else [region]
+        current = []
+        dz = abs(heights[i] - heights[i - 1]) if i else 0.0
         for part in parts:
-            if part.area < min_area:
+            if part.area <= 0 or part.area < min_area:
                 continue
-            n_pts = max(1, int(math.ceil(part.area / max_area_per_point)))
-            if n_pts == 1:
-                c = part.centroid
-                points.append(ContactPoint(c.x, c.y, heights[i], i, part.area))
-            else:
-                # 면적이 큰 조각은 bbox 를 격자로 나눠 각 칸의 중심이 폴리곤
-                # 안에 있으면 접촉점으로 쓴다. 완벽한 균등 분할은 아니지만,
-                # "접촉점 여러 개로 나눈다"는 목적에는 충분하고 계산이 싸다.
-                minx, miny, maxx, maxy = part.bounds
-                side = math.sqrt(max_area_per_point)
-                nx = max(1, int(math.ceil((maxx - minx) / side)))
-                ny = max(1, int(math.ceil((maxy - miny) / side)))
-                for ix in range(nx):
-                    for iy in range(ny):
-                        px = minx + (ix + 0.5) * (maxx - minx) / nx
-                        py = miny + (iy + 0.5) * (maxy - miny) / ny
-                        from shapely.geometry import Point as _Point
-                        p = _Point(px, py)
-                        if part.contains(p):
-                            points.append(ContactPoint(
-                                px, py, heights[i], i,
-                                part.area / (nx * ny)))
-                if not any(cp.layer == i for cp in points[-nx * ny:]):
-                    # 격자점이 전부 폴리곤 밖(오목한 모양)이면 중심점 하나로
-                    # 대체한다 — 접촉점이 하나도 안 뽑히는 것보다 낫다.
-                    c = part.centroid
-                    points.append(ContactPoint(c.x, c.y, heights[i], i, part.area))
+            recent = []
+            seen = set()
+            for old_part, old_points in previous:
+                if part.distance(old_part) <= dz + 1e-8:
+                    for cp in old_points:
+                        if heights[i] - cp.z < spacing * 0.75 and id(cp) not in seen:
+                            recent.append(cp)
+                            seen.add(id(cp))
+            # 공간 해시로 가까운 점만 검사하여 큰 면에서의 전체 비교를 피한다.
+            buckets = {}
+            def add_bucket(cp):
+                key = (math.floor(cp.x / spacing), math.floor(cp.y / spacing))
+                buckets.setdefault(key, []).append(cp)
+            for cp in recent:
+                add_bucket(cp)
+            minx, miny, maxx, maxy = part.bounds
+            for ix in range(math.floor(minx / spacing), math.ceil(maxx / spacing)):
+                for iy in range(math.floor(miny / spacing), math.ceil(maxy / spacing)):
+                    cell = part.intersection(box(ix * spacing, iy * spacing,
+                                                 (ix + 1) * spacing, (iy + 1) * spacing))
+                    if cell.is_empty or cell.area <= 1e-12:
+                        continue
+                    c = cell.centroid
+                    if not cell.covers(c):
+                        c = cell.representative_point()
+                    near = (cp for bx in range(ix - 1, ix + 2)
+                            for by in range(iy - 1, iy + 2)
+                            for cp in buckets.get((bx, by), []))
+                    if any((cp.x - c.x) ** 2 + (cp.y - c.y) ** 2
+                           + (cp.z - heights[i]) ** 2 < (spacing * 0.75) ** 2
+                           for cp in near):
+                        continue
+                    cp = ContactPoint(c.x, c.y, heights[i], i, cell.area)
+                    points.append(cp)
+                    recent.append(cp)
+                    add_bucket(cp)
+            current.append((part, recent))
+        previous = current
     return points
 
 
@@ -223,139 +239,208 @@ def grow_branches(
     max_branch_angle_deg: float = 25.0,
     bed_radius: float = 0.5,
     contact_z_offset: float = 0.0,
+    bed_z: Optional[float] = None,
+    contact_radius: Optional[float] = None,
 ) -> SupportSkeleton:
-    """접촉점에서 베드까지 가지를 내리며 병합한다.
+    """도달 가능한 아래층에서만 병합하는, 각도 제한이 있는 탐욕적 트리 성장.
 
-    ``contact_z_offset`` : 접촉점을 오버행 표면 높이 그대로 두면, 그 자리에
-    놓일 구슬이 표면과 같은 높이라 구 반지름만큼 모델과 수직으로 겹친다.
-    XY 방향으로 아무리 밀어내도 이 겹침은 못 없앤다(실측: 배 모델에서
-    관통 92개 중 60개, 65%가 접촉점 높이 ±0.5mm 안에서 발생했다). 이 만큼
-    아래로 내려서 배치해야 한다(보통 0.5*접촉구슬지름 + z간격).
-
-    핵심 발견(첫 시제품에서 실측으로 드러남): 가지가 **수직으로만** 내려가면
-    시작점이 이미 가까웠던 것들 말고는 절대 병합되지 않는다. 실제 트리
-    서포터가 나뭇가지처럼 보이는 이유는 가지가 아래로 내려가며 서로를 향해
-    **안쪽으로 기운다**는 데 있다.
-
-    구현 노트(정직하게 밝혀야 할 단순화):
-
-    - 충돌 회피는 "이 xy 위치가 모델 안쪽이면 그 가지를 그 층에서는 멈추고
-      다음 층에서 다시 시도"하는 나이브한 버전이다.
-    - 병합은 거리+각도+모델 여유 세 조건을 모두 본다(요구사항 7번).
+    다음 층까지의 높이 차와 기울기로 두 도달 원을 만들고 교집합에서
+    합류한다. 엣지 전체의 반지름/모델 충돌을 검사하며, 통과할 수 없는
+    벽을 건너뛰지 않는다. 베드 또는 허용된 모델 윗면에 도달하지 못한
+    나무는 통째로 제거하고 누락된 접점 수를 경고한다.
     """
-    if not contact_points:
-        return SupportSkeleton()
+    from bisect import bisect_left
+    from .tree_collision import SliceCollision
 
+    if step_h <= 0 or merge_distance <= 0 or bed_radius <= 0:
+        raise ValueError("성장 간격, 병합 거리, 가지 반지름은 양수여야 합니다.")
+    if not (0 <= max_branch_angle_deg < 90 and 0 < max_merge_angle_deg < 180):
+        raise ValueError("가지/병합 각도가 유효 범위를 벗어났습니다.")
     skeleton = SupportSkeleton()
-    z0 = min(heights)
-    z_top = max(cp.z for cp in contact_points) - contact_z_offset
-    max_lean = step_h * math.tan(math.radians(max_branch_angle_deg))
-
-    active: List[dict] = []
-
-    def find_model_at_z(z: float):
-        idx = min(range(len(heights)), key=lambda i: abs(heights[i] - z))
-        return clean(model_slices[idx])
-
-    def layer_at(zz: float) -> int:
-        return min(range(len(heights)), key=lambda i: abs(heights[i] - zz))
-
-    z = z_top
-    remaining = sorted(contact_points, key=lambda p: -p.z)
+    if not contact_points:
+        return skeleton
+    if len(heights) == 0:
+        raise ValueError("모델 슬라이스 높이가 필요합니다.")
+    collision = SliceCollision(model_slices, heights, gen.xy_clearance_mm)
+    bed = float(heights[0]) if bed_z is None else bed_z
+    tip_radius = bed_radius if contact_radius is None else contact_radius
+    lean = math.tan(math.radians(max_branch_angle_deg))
+    merge_lean = min(lean, math.tan(math.radians(max_merge_angle_deg * 0.5)))
+    active = []
+    grounded = set()
+    remaining = sorted(contact_points, key=lambda p: (-p.z, p.x, p.y))
     ci = 0
-    max_steps = int(math.ceil((z_top - z0) / step_h)) + 2
-    for _ in range(max_steps):
-        while ci < len(remaining) and remaining[ci].z - contact_z_offset >= z - 1e-6:
+    z = remaining[0].z - contact_z_offset
+
+    def layer_at(zz):
+        return min(len(heights) - 1, max(0, bisect_left(heights, zz)))
+
+    def xyz(node):
+        return (node.x, node.y, node.z)
+
+    def radius_for(load):
+        return bed_radius * min(2.5, math.sqrt(load)) if gen.adaptive_bead_size else bed_radius
+
+    def attach(tips, x, y, zz, radius):
+        if gen.max_beads is not None and len(skeleton.nodes) >= gen.max_beads:
+            from .validation import guard_bead_count
+            guard_bead_count(len(skeleton.nodes) + 1, gen.max_beads)
+        idx = skeleton.add_node(x, y, zz, None, radius, layer_at(zz))
+        for tip in tips:
+            skeleton.reparent(tip["node"], idx)
+        if zz - radius <= bed + 1e-7:
+            skeleton.nodes[idx].kind = "root"
+            grounded.add(idx)
+            return None
+        return {"node": idx, "load": sum(t["load"] for t in tips)}
+
+    # 공간 해시로 병합 후보를 국소적으로 찾는다. 먼 가지끼리 전부 비교하지 않는다.
+    def nearby_pairs(tips):
+        buckets = {}
+        pairs = []
+        for i, tip in enumerate(tips):
+            node = skeleton.nodes[tip["node"]]
+            key = (math.floor(node.x / merge_distance), math.floor(node.y / merge_distance))
+            for bx in range(key[0] - 1, key[0] + 2):
+                for by in range(key[1] - 1, key[1] + 2):
+                    for j in buckets.get((bx, by), []):
+                        other = skeleton.nodes[tips[j]["node"]]
+                        d = math.hypot(node.x - other.x, node.y - other.y)
+                        if d <= merge_distance:
+                            pairs.append((d, j, i))
+            buckets.setdefault(key, []).append(i)
+        return sorted(pairs)
+
+    while z >= bed + bed_radius - 1e-7:
+        while ci < len(remaining) and remaining[ci].z - contact_z_offset >= z - 1e-7:
             cp = remaining[ci]
-            node = skeleton.add_node(cp.x, cp.y, cp.z - contact_z_offset, None,
-                                     bed_radius, cp.layer, kind="contact")
-            active.append({"node": node, "x": cp.x, "y": cp.y,
-                          "z": cp.z - contact_z_offset})
             ci += 1
-        if not active and ci >= len(remaining):
-            break
-
-        nz = max(z0, z - step_h)
-        model = find_model_at_z(nz)
-
-        # 안쪽으로 기울이기: 각 가지 끝을 '가장 가까운 다른 가지 끝' 방향으로
-        # max_lean 만큼(넘지 않게) 끌어당긴다. 전부 중심으로 당기면 실제
-        # 지지점 배치와 무관하게 뭉치므로, '전체 중심'이 아니라 '가장 가까운
-        # 이웃'을 목표로 삼아야 실제 트리 서포터처럼 국소적으로 합쳐진다.
-        targets = []
-        for i, tip in enumerate(active):
-            best_d, best_j = None, None
-            for j, other in enumerate(active):
-                if i == j:
-                    continue
-                d = math.hypot(tip["x"] - other["x"], tip["y"] - other["y"])
-                if best_d is None or d < best_d:
-                    best_d, best_j = d, j
-            if best_j is not None and best_d > 1e-6:
-                other = active[best_j]
-                ux = (other["x"] - tip["x"]) / best_d
-                uy = (other["y"] - tip["y"]) / best_d
-                lean = min(max_lean, best_d / 2.0)  # 상대를 지나쳐 가지 않게
-                targets.append((tip["x"] + ux * lean, tip["y"] + uy * lean))
+            zz = cp.z - contact_z_offset
+            if zz < bed + tip_radius or not collision.sphere_clear(cp.x, cp.y, zz, tip_radius):
+                continue
+            idx = skeleton.add_node(cp.x, cp.y, zz, None, tip_radius, cp.layer, kind="contact")
+            if zz - tip_radius <= bed + 1e-7:
+                grounded.add(idx)
             else:
-                targets.append((tip["x"], tip["y"]))
+                active.append({"node": idx, "load": 1})
+        nz = max(bed + bed_radius, z - step_h)
+        pairs = nearby_pairs(active)
+        consumed = set()
+        next_active = []
+        nearest = {}
+        for distance, a, b in pairs:
+            nearest.setdefault(a, b)
+            nearest.setdefault(b, a)
+            if a in consumed or b in consumed:
+                continue
+            pa, pb = active[a], active[b]
+            na, nb = skeleton.nodes[pa["node"]], skeleton.nodes[pb["node"]]
+            desired = radius_for(pa["load"] + pb["load"])
+            for radius in sorted({bed_radius, desired}, reverse=True):
+                zz = max(nz, bed + radius)
+                if zz >= min(na.z, nb.z) - 1e-7:
+                    continue
+                ra, rb = (na.z - zz) * merge_lean, (nb.z - zz) * merge_lean
+                lo, hi = max(0.0, distance - rb), min(distance, ra)
+                if lo > hi + 1e-8:
+                    continue
+                along = min(hi, max(lo, distance * pb["load"] / (pa["load"] + pb["load"])))
+                t = along / distance if distance > 1e-9 else 0.5
+                x, y = na.x + (nb.x - na.x) * t, na.y + (nb.y - na.y) * t
+                target = (x, y, zz)
+                if not (collision.edge_clear(xyz(na), target, na.radius, radius)
+                        and collision.edge_clear(xyz(nb), target, nb.radius, radius)):
+                    continue
+                tip = attach([pa, pb], x, y, zz, radius)
+                if tip is not None:
+                    next_active.append(tip)
+                consumed.update((a, b))
+                break
 
-        for tip, (tx, ty) in zip(active, targets):
-            if _model_blocks(tx, ty, model, gen.xy_clearance_mm):
-                # 기울인 위치가 막히면 기울이지 않고 제자리에서 시도한다.
-                tx, ty = tip["x"], tip["y"]
-            if _model_blocks(tx, ty, model, gen.xy_clearance_mm):
-                # 제자리도 막혔다. 예전에는 여기서 그냥 대기했는데(그러면
-                # 가지가 장애물 위에 갇혀 병합도 못 하고 트렁크만 늘어난다),
-                # 실제 트리 서포터처럼 옆으로 우회해서 내려간다.
-                detour = _find_detour(tip["x"], tip["y"], model,
-                                      gen.xy_clearance_mm, max_lean)
-                if detour is None:
-                    continue  # 우회로도 없으면 이번 층은 대기
-                tx, ty = detour
-            new_node = skeleton.add_node(tx, ty, nz, None, bed_radius,
-                                         layer_at(nz), kind="trunk")
-            skeleton.reparent(tip["node"], new_node)
-            tip["node"] = new_node
-            tip["x"], tip["y"], tip["z"] = tx, ty, nz
+        for i, tip in enumerate(active):
+            if i in consumed:
+                continue
+            node = skeleton.nodes[tip["node"]]
+            moved = False
+            desired = radius_for(tip["load"])
+            for radius in sorted({bed_radius, min(node.radius, desired), desired}, reverse=True):
+                zz = max(nz, bed + radius)
+                if zz >= node.z - 1e-7:
+                    continue
+                reach = (node.z - zz) * lean
+                targets = []
+                if i in nearest:
+                    other = skeleton.nodes[active[nearest[i]]["node"]]
+                    dx, dy = other.x - node.x, other.y - node.y
+                    d = math.hypot(dx, dy)
+                    t = min(reach / d, 0.5) if d > 1e-9 else 0.0
+                    targets.append((node.x + dx * t, node.y + dy * t))
+                targets.append(node.xy)
+                # 우회도 도달 반경 안에서만 시도한다. 벽 너머로 건너뛰지 않는다.
+                for scale in (1.0, 0.5):
+                    if reach > 1e-9:
+                        targets.extend((node.x + reach * scale * math.cos(k * math.pi / 8),
+                                        node.y + reach * scale * math.sin(k * math.pi / 8))
+                                       for k in range(16))
+                for x, y in targets:
+                    if collision.edge_clear(xyz(node), (x, y, zz), node.radius, radius):
+                        nxt = attach([tip], x, y, zz, radius)
+                        if nxt is not None:
+                            next_active.append(nxt)
+                        moved = True
+                        break
+                if moved:
+                    break
+            if moved:
+                continue
+            # 모델 위 착지가 허용된 경우에만 바로 아래의 면에서 멈춘다.
+            if not gen.support_on_build_plate_only:
+                lo, hi = max(bed + node.radius, nz), node.z
+                if lo < hi and not collision.sphere_clear(node.x, node.y, lo, node.radius):
+                    for _ in range(24):
+                        mid = (lo + hi) * 0.5
+                        if collision.sphere_clear(node.x, node.y, mid, node.radius):
+                            hi = mid
+                        else:
+                            lo = mid
+                    k = max(0, min(len(heights) - 1, bisect_left(heights, hi - node.radius) - 1))
+                    if clean(model_slices[k]).covers(Point(node.x, node.y)):
+                        if hi < node.z - 1e-7 and collision.edge_clear(xyz(node), (node.x, node.y, hi), node.radius, node.radius):
+                            landed = attach([tip], node.x, node.y, hi, node.radius)
+                            idx = landed["node"] if landed is not None else len(skeleton.nodes) - 1
+                        else:
+                            idx = tip["node"]
+                        grounded.add(idx)
+                        # 접점 하나만 있는 나무는 contact 종류를 유지한다.
+                        if skeleton.nodes[idx].kind != "contact":
+                            skeleton.nodes[idx].kind = "root"
+            # 경로가 없으면 대기하거나 순간이동하지 않고 이 나무를 제거한다.
+        active = next_active
+        if nz >= z - 1e-8:
+            break
         z = nz
 
-        # 병합 검사: 거리 + 각도 + 모델 여유
-        merged_flags = [False] * len(active)
-        new_active: List[dict] = []
-        for a in range(len(active)):
-            if merged_flags[a]:
-                continue
-            best_b = None
-            best_d = merge_distance
-            for b in range(a + 1, len(active)):
-                if merged_flags[b]:
-                    continue
-                dx = active[a]["x"] - active[b]["x"]
-                dy = active[a]["y"] - active[b]["y"]
-                d = math.hypot(dx, dy)
-                if d < best_d:
-                    best_b = b
-                    best_d = d
-            if best_b is not None:
-                pa, pb = active[a], active[best_b]
-                mx, my = (pa["x"] + pb["x"]) / 2, (pa["y"] + pb["y"]) / 2
-                if not _model_blocks(mx, my, model, gen.xy_clearance_mm):
-                    merge_node = skeleton.add_node(
-                        mx, my, z, None, bed_radius, layer_at(z), kind="trunk")
-                    skeleton.reparent(pa["node"], merge_node)
-                    skeleton.reparent(pb["node"], merge_node)
-                    merged_flags[a] = merged_flags[best_b] = True
-                    new_active.append({"node": merge_node, "x": mx, "y": my,
-                                       "z": z})
-                    continue
-            if not merged_flags[a]:
-                new_active.append(active[a])
-        active = new_active
-        if z <= z0 + 1e-6:
-            break
-
-    return skeleton
+    keep = set()
+    stack = list(grounded)
+    while stack:
+        idx = stack.pop()
+        if idx not in keep:
+            keep.add(idx)
+            stack.extend(skeleton.children[idx])
+    result = SupportSkeleton()
+    mapping = {}
+    for old in sorted(keep):
+        n = skeleton.nodes[old]
+        mapping[old] = result.add_node(n.x, n.y, n.z, None, n.radius, n.layer, n.kind)
+    for old, new in mapping.items():
+        parent = skeleton.nodes[old].parent
+        if parent in mapping:
+            result.reparent(new, mapping[parent])
+    lost = len(contact_points) - sum(n.kind == "contact" for n in result.nodes)
+    if lost:
+        warnings.warn(f"트리 접점 {len(contact_points)}개 중 {lost}개는 각도/충돌/접지 조건을 "
+                      "만족하는 경로가 없어 제외했습니다. 미리보기에서 지지 누락을 확인하세요.", stacklevel=2)
+    return result
 
 
 def skeleton_to_bead_seeds(
@@ -365,6 +450,7 @@ def skeleton_to_bead_seeds(
     model_slices: Optional[Sequence] = None,
     heights: Optional[Sequence[float]] = None,
     xy_clearance: float = 0.0,
+    max_beads: Optional[int] = None,
 ) -> List[Tuple[float, float, float, float]]:
     """엣지(부모-자식)마다 구슬 체인으로 바꾼다.
 
@@ -377,10 +463,26 @@ def skeleton_to_bead_seeds(
     모델 모서리를 스칠 수 있다(첫 시제품 실측: 344개 중 12개가 이렇게
     관통했다). 각 구슬을 모델 바깥으로 최소 거리만 밀어낸다.
     """
-    seeds: List[Tuple[float, float, float, float]] = []
+    seeds = {}
+    tolerance = min(contact_diameter_mm, body_diameter_mm) * 1e-7
+    if tolerance <= 0:
+        raise ValueError("구슬 지름은 양수여야 합니다.")
+
+    def add_seed(seed):
+        key = tuple(round(v / tolerance) for v in seed[:3])
+        old = seeds.get(key)
+        if old is None or seed[3] > old[3]:
+            seeds[key] = seed
+        if max_beads is not None and len(seeds) > max_beads:
+            from .validation import guard_bead_count
+            guard_bead_count(len(seeds), max_beads)
+
     _cache: dict = {}
     for node_idx, node in enumerate(skeleton.nodes):
         if node.parent is None:
+            # 단독 접지 접점도 하나의 유효한 구슬이다.
+            if not skeleton.children[node_idx]:
+                add_seed((node.x, node.y, node.z, 2.0 * node.radius))
             continue
         parent = skeleton.nodes[node.parent]
         p0 = np.array([node.x, node.y, node.z])
@@ -397,7 +499,8 @@ def skeleton_to_bead_seeds(
             pts = [(node.x, node.y, node.z, d_child)]
         else:
             pitch = max(min(d_child, d_parent) * 0.9, 1e-6)
-            n = max(1, int(round(length / pitch)))
+            # round 는 간격을 구 지름보다 크게 만들어 사슬을 끊을 수 있다.
+            n = max(1, int(math.ceil(length / pitch)))
             pts = []
             for i in range(n + 1):
                 t = i / n
@@ -408,8 +511,9 @@ def skeleton_to_bead_seeds(
             pts = [_nudge_out_of_model(x, y, z, dd, model_slices, heights,
                                        xy_clearance, _cache=_cache)
                   for x, y, z, dd in pts]
-        seeds.extend(pts)
-    return seeds
+        for seed in pts:
+            add_seed(seed)
+    return list(seeds.values())
 
 
 def _nudge_out_of_model(x, y, z, d, model_slices, heights, xy_clearance,

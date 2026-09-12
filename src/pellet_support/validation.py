@@ -104,6 +104,20 @@ def validate_bead_params(params: SupportBeadParams, label: str = "구슬") -> No
 def validate_gen_params(gen: SupportGenParams) -> None:
     """서포터 영역 탐지 파라미터 검사."""
     _require(
+        math.isfinite(gen.branch_angle_deg) and 0 <= gen.branch_angle_deg < 90,
+        "트리 가지 각도는 수직 기준 0 이상 90도 미만이어야 합니다.",
+    )
+    for name, value in (
+        ("트리 접점 간격", gen.tree_contact_spacing_mm),
+        ("트리 병합 거리", gen.branch_merge_distance_mm),
+    ):
+        _require(value is None or (math.isfinite(value) and value > 0),
+                 f"{name}은 유한한 양수(mm)여야 합니다. 비워두면 자동입니다.")
+    _require(math.isfinite(gen.contact_z_gap_mm) and gen.contact_z_gap_mm >= 0,
+             "모델과의 Z 간격(mm)은 유한한 0 이상의 값이어야 합니다.")
+    _require(gen.max_beads is None or (isinstance(gen.max_beads, int) and gen.max_beads > 0),
+             "구슬 수 상한은 양의 정수여야 합니다.")
+    _require(
         gen.layer_height_mm > 0,
         f"구슬 층높이가 {gen.layer_height_mm}mm 입니다. "
         f"보통 구슬 파라미터에서 자동 계산되므로, 직접 지정했다면 지우세요.",

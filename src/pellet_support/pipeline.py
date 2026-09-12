@@ -131,95 +131,81 @@ def _generate_tree_support(
     detail: int,
     verbose: bool,
 ) -> "SupportResult":
-    """나뭇가지 골격을 만들고 그것을 구슬로 표현한다.
-
-    단계별 실측(배/무한큐브/나뭇가지 거치대):
-
-    - 접촉점 52~317개 -> 병합 후 루트(트렁크) 7~49개
-    - 구슬 수: 기존 격자 방식 대비 배 698->414, 큐브 13,372->1,038,
-      거치대는 격자 방식이 227만개를 요구해 아예 불가능했던 것이 2,583개
-    - 모델 관통 0개
-    """
-    import math as _math
-
-    from shapely.geometry import Polygon as _Polygon
-
-    from .skeleton import (
-        assign_hierarchical_radii,
-        extract_contact_points,
-        fix_residual_collisions,
-        grow_branches,
-        skeleton_to_bead_seeds,
-    )
+    """희소 접점과 충돌을 검사한 가지 그래프를 구슬로 변환한다."""
+    from .regions import detect_overhangs
+    from .skeleton import extract_contact_points, grow_branches, skeleton_to_bead_seeds
+    from .tree_collision import SliceCollision
 
     heights = [z0 + (i + 0.5) * det_h for i in range(len(det_slices))]
-
-    # 오버행: 아래층을 부풀린 것에서 삐져나온 부분(기존 방식과 동일한 정의)
-    ang = _math.radians(gen.overhang_angle_deg)
-    step = det_h / _math.tan(ang)
-    overhang = []
-    for i in range(len(det_slices)):
-        cur = clean(det_slices[i])
-        if i == 0 or cur.is_empty:
-            overhang.append(_Polygon())
-            continue
-        below = clean(det_slices[i - 1])
-        overhang.append(cur.difference(below.buffer(step))
-                        if not below.is_empty else cur)
-
+    overhang = detect_overhangs(det_slices, gen, det_h)
+    spacing = gen.tree_contact_spacing_mm or contact_params.bead_diameter_mm * 4.0
+    limit = min(gen.max_beads or bead_budget(detail), bead_budget(detail))
+    gap = max(gen.contact_z_gap_mm, gen.contact_z_gap_layers * gen.layer_height_mm)
+    z_off = 0.5 * contact_params.bead_diameter_mm + gap + 0.5 * det_h
+    collision = SliceCollision(det_slices, heights, gen.xy_clearance_mm)
+    # 기둥 옆의 대표점이 충돌해서 가지를 잃지 않도록, 구슬이 들어갈 수
+    # 있는 부분을 먼저 구한 후 그 내부에서 대표점을 고른다.
+    contact_regions = [collision.free_region(region, heights[i] - z_off,
+                                             0.5 * contact_params.bead_diameter_mm)
+                       if not region.is_empty else region
+                       for i, region in enumerate(overhang)]
+    unavailable = sum(not old.is_empty and new.is_empty
+                      for old, new in zip(overhang, contact_regions))
+    if unavailable:
+        warnings.warn(f"오버행 {unavailable}개 층에는 지정한 구슬과 여유가 들어갈 "
+                      "접점 공간이 없습니다. 구슬 크기/XY 여유를 확인하세요.", stacklevel=2)
     contacts = extract_contact_points(
-        overhang, heights,
-        max_area_per_point=contact_params.bead_diameter_mm ** 2 * 3,
+        contact_regions, heights, max_area_per_point=spacing ** 2,
+        min_area=0.0, contact_spacing_mm=spacing,
     )
+    guard_bead_count(len(contacts), limit)
     if verbose:
-        print(f"      접촉점 {len(contacts)}개")
+        print(f"      트리 접점 {len(contacts)}개, 간격 {spacing:.3f}mm")
     if not contacts:
         return SupportResult(trimesh.Trimesh(), None, det_slices)
 
-    z_off = 0.5 * contact_params.bead_diameter_mm + gen.contact_z_gap_mm
+    # 높이는 단면 중앙이므로, 실제 아랫면은 반 탐지층 아래에 있다.
     skeleton = grow_branches(
-        contacts, det_slices, heights, gen,
+        contacts, det_slices, heights, replace(gen, max_beads=limit),
         step_h=max(det_h * 3, contact_params.bead_diameter_mm * 0.5),
-        merge_distance=gen.branch_merge_distance_mm
-                       or contact_params.bead_diameter_mm * 6,
+        merge_distance=gen.branch_merge_distance_mm or contact_params.bead_diameter_mm * 6,
         max_branch_angle_deg=gen.branch_angle_deg,
         contact_z_offset=z_off,
+        bed_z=z0, bed_radius=0.5 * body_params.bead_diameter_mm,
+        contact_radius=0.5 * contact_params.bead_diameter_mm,
     )
     if verbose:
-        print(f"      골격: {skeleton.summary()}, 트렁크 {len(skeleton.roots())}개")
-
-    if gen.adaptive_bead_size:
-        assign_hierarchical_radii(
-            skeleton, contact_params.bead_diameter_mm,
-            body_params.bead_diameter_mm)
-
+        print(f"      골격: {skeleton.summary()}, 루트 {len(skeleton.roots())}개")
+    # 성장 과정에서 가변 반지름과 엣지 전체를 검사했다. 구슬을 개별적으로
+    # 밀어내면 사슬과 접점이 끊어지므로, 검증한 경로를 그대로 샘플링한다.
     seeds = skeleton_to_bead_seeds(
-        skeleton, contact_params.bead_diameter_mm,
-        body_params.bead_diameter_mm,
-        model_slices=det_slices, heights=heights,
-        xy_clearance=gen.xy_clearance_mm,
+        skeleton, contact_params.bead_diameter_mm, body_params.bead_diameter_mm,
+        max_beads=limit,
     )
-    seeds = fix_residual_collisions(seeds, mesh, gen.xy_clearance_mm)
     if verbose:
         print(f"      구슬 {len(seeds)}개")
-
-    limit = gen.max_beads if gen.max_beads else bead_budget(detail)
-    guard_bead_count(len(seeds), min(limit, bead_budget(detail)))
+    if not seeds:
+        return SupportResult(trimesh.Trimesh(), None, det_slices)
 
     # 구슬 좌표를 BeadPlan 형태로 담아 기존 meshing/검증 코드를 재사용한다.
     plan = BeadPlan()
     bead_h = gen.layer_height_mm
+    contact_centres = {(round(n.x, 7), round(n.y, 7), round(n.z, 7))
+                       for n in skeleton.nodes if n.kind == "contact"}
     by_layer: Dict[int, list] = {}
     for x, y, z, d in seeds:
         li = max(0, int((z - z0) / bead_h))
         by_layer.setdefault(li, []).append(
             {"x": x, "y": y, "angle": 0.0,
-             "region": SupportBeadRegion.BODY, "d": d,
+             "region": (SupportBeadRegion.CONTACT
+                        if (round(x, 7), round(y, 7), round(z, 7)) in contact_centres
+                        else SupportBeadRegion.BODY), "d": d,
              "z_exact": z})
     for li in sorted(by_layer):
         plan.layers.append({
             "layer": li,
             "z_bottom": z0 + li * bead_h,
+            "slice_index": min(len(det_slices) - 1, int((li + 0.5) * bead_h / det_h)),
             "solid": None,
             "beads": by_layer[li],
         })
@@ -255,8 +241,9 @@ def generate_support(
     # 보였다. 확실히 과한 경우만 미리 걸러서, 몇 초 안에 원인과 해결법을
     # 알려준다.
     quick_limit = gen.max_beads if gen.max_beads else bead_budget(detail)
-    quick = quick_overhang_estimate(mesh, gen, contact_params)
-    guard_quick_estimate(quick, quick_limit)
+    if not gen.tree_enabled:
+        quick = quick_overhang_estimate(mesh, gen, contact_params)
+        guard_quick_estimate(quick, quick_limit)
 
     # --- 1) 탐지: 모델 형상을 제대로 볼 수 있는 얇은 층으로 자른다 -----------
     # 구슬 격자 간격(=layer_height_mm)으로 자르면, 굵은 펠릿을 쓸 때 층이
@@ -271,6 +258,13 @@ def generate_support(
     # 구슬을 꺼낼 수 있는 통로 폭은 구슬 지름으로 본다.
     if not gen.allow_internal_supports:
         gen = replace(gen, removal_opening_mm=contact_params.bead_diameter_mm)
+    # 격자 부피 추정/확장은 희소한 트리와 무관하다. 트리는 여기서 분기해
+    # 밀집 충전의 예상 개수 때문에 미리 차단되거나 빈 영역에 막히지 않는다.
+    if gen.tree_enabled:
+        return _generate_tree_support(
+            mesh, gen, contact_params, body_params, det_slices, det_h,
+            z0=float(mesh.bounds[0][2]), detail=detail, verbose=verbose,
+        )
     support, contact = build_support_regions(det_slices, gen, det_h)
     if sum(1 for s in support if not clean(s).is_empty) == 0:
         return SupportResult(trimesh.Trimesh(), None, det_slices)
@@ -288,20 +282,6 @@ def generate_support(
     estimated = estimate_bead_count(support, gen, contact_params)
     # 상한은 구슬 면 수에 따라 달라진다. 사용자가 명시하면 그 값을 쓴다.
     limit = gen.max_beads if gen.max_beads else bead_budget(detail)
-
-    # --- 나뭇가지(트리) 골격 모드 ------------------------------------------
-    #
-    # 기존 방식은 "오버행 영역을 격자로 최대한 채운다"였다. 트리 모드는
-    # 먼저 골격(접촉점 -> 가지 -> 병합 -> 베드)을 정하고, 그 골격을 구슬로
-    # 표현한다. 오버행 탐지와 공동(꺼낼 수 없는 곳) 판정은 위에서 이미 끝난
-    # 것을 그대로 재사용하므로, 검증된 전처리는 건드리지 않는다.
-    if gen.tree_enabled:
-        result = _generate_tree_support(
-            mesh, gen, contact_params, body_params,
-            det_slices, det_h, z0=float(mesh.bounds[0][2]),
-            detail=detail, verbose=verbose,
-        )
-        return result
 
     guard_bead_count(estimated, min(limit, bead_budget(detail)))
 

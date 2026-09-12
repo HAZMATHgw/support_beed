@@ -254,8 +254,11 @@ class SupportGenParams:
     #: 꺼낼 방법이 없어서 재료와 시간만 버리고 무게만 늘어난다.
     #: 나뭇가지(트리) 골격 모드. 켜면 '영역을 격자로 채우는' 방식 대신
     #: 접촉점 -> 가지 -> 병합 -> 베드 골격을 먼저 만들고 그것을 구슬로
-    #: 표현한다. 실측(노즐 5mm): 배 698->414개, 무한큐브 13,372->1,038개.
-    tree_enabled: bool = False
+    #: 표현한다. 격자 충전은 tree_enabled=False 로 선택할 수 있다.
+    tree_enabled: bool = True
+    #: 트리 접점 간격(mm). None 이면 접촉 구슬 지름의 4배.
+    #: 크게 할수록 접점과 가지가 줄지만 오버행의 지지 간격도 넓어진다.
+    tree_contact_spacing_mm: Optional[float] = None
     #: 가지가 한 층 내려갈 때 안쪽으로 기울 수 있는 최대 각도(수직 기준).
     #: 수직으로만 내려가면 가지가 서로 만나지 못해 절대 병합되지 않는다.
     branch_angle_deg: float = 25.0

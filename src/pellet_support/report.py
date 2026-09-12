@@ -132,8 +132,12 @@ def export_preview(plan: BeadPlan, slices, layer_id: int, path: str) -> None:
                 continue
             ax.add_patch(MplPoly(np.array(p.exterior.coords), closed=True, **kw))
 
-    draw(clean(slices[layer_id]), facecolor="#d8d8d8", edgecolor="#909090", lw=0.6)
-    entry = plan.layers[layer_id]
+    # 트리는 빈 층을 저장하지 않는다. 층 번호는 배열 인덱스가 아니다.
+    entry_index = next(i for i, layer in enumerate(plan.layers) if layer["layer"] == layer_id)
+    entry = plan.layers[entry_index]
+    slice_index = min(len(slices) - 1, entry.get("slice_index", layer_id))
+    if slice_index >= 0:
+        draw(clean(slices[slice_index]), facecolor="#d8d8d8", edgecolor="#909090", lw=0.6)
     if entry["solid"] is not None:
         draw(entry["solid"], facecolor="#9ec5ff", edgecolor="none", alpha=0.7)
     for b in entry["beads"]:
@@ -142,7 +146,7 @@ def export_preview(plan: BeadPlan, slices, layer_id: int, path: str) -> None:
             Circle((b["x"], b["y"]), 0.5 * b["d"], facecolor=color,
                    edgecolor="white", lw=0.3, alpha=0.9)
         )
-    nxt = layer_id + 1
+    nxt = entry_index + 1
     if nxt < len(plan.layers):
         for b in plan.layers[nxt]["beads"]:
             ax.add_patch(
