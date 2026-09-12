@@ -21,10 +21,12 @@ from pellet_support.validation import (
 
 @pytest.fixture(scope="module")
 def model():
-    leg = trimesh.creation.box(extents=[20, 20, 10])
-    leg.apply_translation([0, 0, 5])
-    top = trimesh.creation.box(extents=[40, 40, 4])
-    top.apply_translation([0, 0, 12])
+    # Input validation only needs a valid supported overhang. Avoid spending
+    # minutes meshing hundreds of thousands of beads in each success smoke test.
+    leg = trimesh.creation.box(extents=[8, 8, 4])
+    leg.apply_translation([0, 0, 2])
+    top = trimesh.creation.box(extents=[16, 16, 2])
+    top.apply_translation([0, 0, 5])
     mesh = trimesh.util.concatenate([leg, top])
     mesh.apply_translation([0, 0, -mesh.bounds[0][2]])
     return mesh

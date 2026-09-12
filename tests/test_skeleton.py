@@ -58,11 +58,13 @@ def _run_skeleton(mesh, nozzle=1.0, hierarchical=True):
                         if not below.is_empty else cur)
     pts = extract_contact_points(
         overhang, heights, max_area_per_point=contact.bead_diameter_mm ** 2 * 3)
-    z_off = 0.5 * contact.bead_diameter_mm + gen.contact_z_gap_mm
+    # Match the pipeline: heights are slice centres, not overhang bottom faces.
+    z_off = 0.5 * contact.bead_diameter_mm + gen.contact_z_gap_mm + 0.5 * det_h
     sk = grow_branches(
         pts, sl, heights, gen,
         step_h=max(det_h * 3, contact.bead_diameter_mm * 0.5),
-        merge_distance=contact.bead_diameter_mm * 6, contact_z_offset=z_off)
+        merge_distance=contact.bead_diameter_mm * 6, contact_z_offset=z_off,
+        bead_radius=0.5 * max(contact.bead_diameter_mm, body.bead_diameter_mm))
     if hierarchical:
         assign_hierarchical_radii(sk, contact.bead_diameter_mm, body.bead_diameter_mm)
     seeds = skeleton_to_bead_seeds(
