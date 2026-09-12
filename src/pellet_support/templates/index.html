@@ -294,6 +294,21 @@
           </select>
         </div>
         <div class="check">
+          <input type="checkbox" id="tree_bracing" checked>
+          <label for="tree_bracing">트리: 이웃 트렁크끼리 베드 연결 + X 가새로 잇기</label>
+        </div>
+        <div class="row">
+          <label for="trunk_slenderness">트리: 트렁크 세장비 상한
+            <span class="hint">높이/굵기. 작을수록 굵고 튼튼(기본 8)</span></label>
+          <input type="number" id="trunk_slenderness" value="8" step="0.5" min="2" max="40">
+        </div>
+        <div class="row">
+          <label for="brace_distance">트리: 가새 연결 거리 (mm)
+            <span class="hint">비우면 몸통 구슬 지름의 20배</span></label>
+          <input type="number" id="brace_distance" value="" step="any" min="0.001"
+                 placeholder="자동">
+        </div>
+        <div class="check">
           <input type="checkbox" id="no_fallback_solid">
           <label for="no_fallback_solid">구슬로 못 채운 좁은 자리를 일반 서포터로
             메우지 않기</label>
@@ -518,7 +533,8 @@ $('go').addEventListener('click', async () => {
   const err = $('err'); err.style.display = 'none';
   if(!picked){ err.textContent = '먼저 모델 파일을 올려주세요.'; err.style.display='block'; return; }
   if($('tree_enabled').checked){
-    for(const id of ['tree_contact_spacing','branch_angle','branch_merge_distance']){
+    for(const id of ['tree_contact_spacing','branch_angle','branch_merge_distance',
+                     'trunk_slenderness','brace_distance']){
       if(!$(id).reportValidity()) return;
     }
   }
@@ -527,11 +543,13 @@ $('go').addEventListener('click', async () => {
   fd.append('model', picked);
   ['nozzle','bead_diameter','min_bead_ratio','overlap','lateral_overlap','vertical_overlap','stagger_period','overhang_angle','xy_clearance',
    'z_gap_layers','contact_layers','body_bead_ratio','sphere_detail','format',
-   'tree_contact_spacing','branch_angle','branch_merge_distance']
+   'tree_contact_spacing','branch_angle','branch_merge_distance',
+   'trunk_slenderness','brace_distance']
     .forEach(k => fd.append(k, $(k).value));
   fd.append('straight_columns', $('straight_columns').checked ? '1' : '0');
   fd.append('auto_tune', $('auto_tune').checked ? '1' : '0');
   fd.append('tree_enabled', $('tree_enabled').checked ? '1' : '0');
+  fd.append('tree_bracing', $('tree_bracing').checked ? '1' : '0');
   fd.append('no_fallback_solid', $('no_fallback_solid').checked ? '1' : '0');
   fd.append('allow_internal_supports',
             $('allow_internal_supports').checked ? '1' : '0');
@@ -606,7 +624,10 @@ $('go').addEventListener('click', async () => {
     $('r-note').textContent = data.tree_enabled
       ? `트리 접점 간격 ${data.tree_contact_spacing_mm.toFixed(2)} mm · `
         + `가지 최대 각도 ${data.branch_angle_deg}° · `
-        + `병합 거리 ${data.branch_merge_distance_mm.toFixed(2)} mm`
+        + `병합 거리 ${data.branch_merge_distance_mm.toFixed(2)} mm · `
+        + `트렁크 세장비 ${data.tree_trunk_slenderness} · `
+        + (data.tree_bracing ? '가새 보강 켜짐' : '가새 보강 꺼짐')
+        + (data.tree_stats ? ` · 유지 접점 ${data.tree_stats.supported_contacts}/${data.tree_stats.requested_contacts}` : '')
       : (c !== null && c < 10)
       ? '측정 배위수가 낮습니다. 서포터 단면이 얇아 가장자리 구슬 비중이 크면 정상입니다. '
         + '넓은 면을 받치는데도 낮다면 층높이 설정을 확인하세요.'
@@ -637,11 +658,14 @@ $('go').addEventListener('click', async () => {
  'stagger_period','straight_columns']
   .forEach(id => $(id).addEventListener('input', render));
 function updateTreeControls(){
-  ['tree_contact_spacing','branch_angle','branch_merge_distance'].forEach(id => {
+  ['tree_contact_spacing','branch_angle','branch_merge_distance',
+   'trunk_slenderness','tree_bracing'].forEach(id => {
     $(id).disabled = !$('tree_enabled').checked;
   });
+  $('brace_distance').disabled = !$('tree_enabled').checked || !$('tree_bracing').checked;
 }
 $('tree_enabled').addEventListener('change', updateTreeControls);
+$('tree_bracing').addEventListener('change', updateTreeControls);
 updateTreeControls();
 render();
 </script>

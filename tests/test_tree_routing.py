@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pellet_support.params import SupportGenParams
 from pellet_support.regions import detect_overhangs
-from pellet_support.skeleton import ContactPoint, extract_contact_points, grow_branches
+from pellet_support.skeleton import ContactPoint, extract_contact_points, grow_branches, skeleton_to_bead_seeds
 from pellet_support.tree_collision import SliceCollision
 
 
@@ -26,7 +26,7 @@ def _grow(contacts, slices=None, heights=None, bed=0.0, angle=25.0, plate_only=T
     return grow_branches(contacts, slices, heights, gen,
                          step_h=0.4, merge_distance=3.0,
                          max_branch_angle_deg=angle, max_merge_angle_deg=50.0,
-                         bed_radius=0.2, contact_radius=0.2, bed_z=bed)
+                         bed_radius=0.2, bead_radius=0.2)
 
 
 def _assert_downward_angles(skeleton, angle):
@@ -38,15 +38,15 @@ def _assert_downward_angles(skeleton, angle):
         assert math.degrees(math.atan2(horizontal, drop)) <= angle + 1e-6
 
 
-def test_impossible_tree_is_removed_with_warning_without_teleporting_other_tree():
+def test_plate_only_excludes_model_landing_without_teleporting_other_tree():
     heights = [0.25 + i * 0.5 for i in range(12)]
     slices = [box(-10, -10, 10, 10) if z < 3 else Polygon() for z in heights]
     contacts = [ContactPoint(0, 0, 5, 10, 1), ContactPoint(20, 0, 5, 10, 1)]
-    with pytest.warns(UserWarning, match="2개 중 1개"):
-        skeleton = _grow(contacts, slices, heights)
-    assert [node.x for node in skeleton.nodes if node.kind == "contact"] == [20]
-    assert all(node.x == pytest.approx(20) for node in skeleton.nodes)
-    assert len(skeleton.roots()) == 1
+    skeleton = _grow(contacts, slices, heights)
+    seeds = skeleton_to_bead_seeds(skeleton, 0.4, 0.4, include_on_model=False)
+    assert seeds
+    assert all(seed[0] == pytest.approx(20) for seed in seeds)
+    assert sum(node.on_bed for node in skeleton.nodes) == 1
     _assert_downward_angles(skeleton, 25)
     collision = SliceCollision(slices, heights, 0.1)
     for parent_idx, child_idx in skeleton.edges():
@@ -75,14 +75,15 @@ def test_contacts_at_different_heights_merge_without_horizontal_edges():
     _assert_downward_angles(skeleton, 25)
 
 
-def test_translated_bed_sets_sphere_bottom_to_bed_height():
+def test_translated_bed_preserves_patch22_root_compression():
     bed = 10.0
     skeleton = _grow([ContactPoint(1, 2, 14, 8, 1)], bed=bed)
     assert skeleton.nodes
     for root_idx in skeleton.roots():
         root = skeleton.nodes[root_idx]
-        assert root.z - root.radius == pytest.approx(bed, abs=1e-8)
-    assert all(node.z - node.radius >= bed - 1e-8 for node in skeleton.nodes)
+        assert root.on_bed
+        assert root.z == pytest.approx(bed + 0.8 * 0.2, abs=1e-8)
+    assert all(node.z >= bed for node in skeleton.nodes)
 
 
 def test_model_landing_is_retained_only_when_build_plate_only_is_disabled():
@@ -95,9 +96,8 @@ def test_model_landing_is_retained_only_when_build_plate_only_is_disabled():
     root = landed.nodes[landed.roots()[0]]
     assert root.z - root.radius == pytest.approx(3.0, abs=1e-6)
     _assert_downward_angles(landed, 0)
-    with pytest.warns(UserWarning, match="1개 중 1개"):
-        rejected = _grow(contacts, slices, heights, angle=0, plate_only=True)
-    assert rejected.nodes == []
+    assert root.on_model
+    assert skeleton_to_bead_seeds(landed, 0.4, 0.4, include_on_model=False) == []
 
 
 def test_continuous_overhang_layers_share_contacts_but_separate_shelves_do_not():

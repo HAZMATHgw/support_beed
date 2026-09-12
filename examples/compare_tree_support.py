@@ -2,13 +2,16 @@
 
 Run from the repository root::
 
-    python examples/compare_tree_support.py --baseline ../support_beed_baseline
-    python examples/compare_tree_support.py --baseline ../support_beed_baseline --nozzle 0.4 --tree-only
+    python examples/compare_tree_support.py --baseline ../support_beed_patch22
+    python examples/compare_tree_support.py --baseline ../support_beed_patch22 --nozzle 0.4 --tree-only
 
 Each checkout/mode runs in a fresh Python process, so module caches cannot mix
 old and new code. Models are deterministic millimetre-scale solid boxes; no
 downloaded model or mesh Boolean backend is needed. Timings are informative,
-not assertions. Connectivity uses actual 3D bead centres and radii, including
+not assertions. ``generation_seconds`` measures support generation alone;
+``seconds`` also includes the independent geometry checks. Every case uses a
+custom detection layer height of 0.25 mm, not the automatic 0.4 mm nozzle profile.
+Connectivity uses actual 3D bead centres and radii, including
 ``z_exact`` for tree beads, rather than their nominal layer heights.
 """
 
@@ -100,7 +103,8 @@ def mesh_clearance_metrics(plan, layer_height, mesh):
 
     records = bead_records(plan, layer_height)
     if not records:
-        return dict(penetrating_beads=0, beads_below_bed=0, min_bead_bottom_mm=None)
+        return dict(penetrating_beads=0, beads_below_bed=0, min_bead_bottom_mm=None,
+                    centres_below_bed=0, min_bead_centre_z_mm=None)
     data = np.asarray(records)
     centres, radii = data[:, :3], data[:, 3] * 0.5
     query = trimesh.proximity.ProximityQuery(mesh)
@@ -115,7 +119,9 @@ def mesh_clearance_metrics(plan, layer_height, mesh):
     bed_z = float(mesh.bounds[0, 2])
     return dict(penetrating_beads=penetrations,
                 beads_below_bed=int(np.count_nonzero(bottoms < bed_z - 1e-6)),
-                min_bead_bottom_mm=round(float(bottoms.min()), 7))
+                min_bead_bottom_mm=round(float(bottoms.min()), 7),
+                centres_below_bed=int(np.count_nonzero(centres[:, 2] < bed_z - 1e-6)),
+                min_bead_centre_z_mm=round(float(centres[:, 2].min()), 7))
 
 
 def run_worker(repo, mode, model_name, nozzle=2.0, bead_diameter=None):
@@ -128,13 +134,13 @@ def run_worker(repo, mode, model_name, nozzle=2.0, bead_diameter=None):
     settings = dict(nozzle_diameter_mm=nozzle, layer_height_mm=contact.layer_height_mm(),
                     detection_layer_height_mm=0.25, xy_clearance_mm=0.3,
                     contact_z_gap_mm=0.2, min_island_area_mm2=0.5)
-    if mode != "default":
-        settings["tree_enabled"] = mode == "tree"
+    settings["tree_enabled"] = mode == "tree"
     gen = SupportGenParams(**settings)
     mesh = make_model(model_name)
     start = time.perf_counter()
     with warnings.catch_warnings(record=True) as caught, contextlib.redirect_stdout(io.StringIO()):
         result = generate_support(mesh, gen, contact, body, detail=0, verbose=False)
+        generation_seconds = time.perf_counter() - start
     metrics = bead_metrics(result.plan, gen.layer_height_mm, float(mesh.bounds[0, 2]))
     metrics.update(mesh_clearance_metrics(result.plan, gen.layer_height_mm, mesh))
     metrics.update(mode=mode, tree_enabled=gen.tree_enabled, model=model_name,
@@ -142,14 +148,16 @@ def run_worker(repo, mode, model_name, nozzle=2.0, bead_diameter=None):
                    detection_layer_height_mm=gen.detection_layer_height_mm,
                    xy_clearance_mm=gen.xy_clearance_mm,
                    contact_z_gap_mm=gen.contact_z_gap_mm,
+                   generation_seconds=round(generation_seconds, 3),
                    seconds=round(time.perf_counter() - start, 3),
+                   tree_stats=getattr(result.plan, "tree_stats", {}),
                    warnings=sorted({str(w.message) for w in caught}))
     print(json.dumps(metrics, ensure_ascii=True))
 
 
 def compare(repo, baseline, model_names, nozzle=2.0, bead_diameter=None, tree_only=False):
     rows = []
-    checkouts = [("current", repo, ("default",) if tree_only else ("default", "grid"))]
+    checkouts = [("current", repo, ("tree",) if tree_only else ("tree", "grid"))]
     if baseline is not None:
         checkouts.insert(0, ("baseline", baseline, ("tree",) if tree_only else ("grid", "tree")))
     for label, checkout, modes in checkouts:
@@ -184,7 +192,7 @@ def main():
     parser.add_argument("--tree-only", action="store_true", help="Skip dense grid generation for fine nozzles")
     parser.add_argument("--json", type=Path, help="Save complete metrics as JSON")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--mode", choices=("default", "tree", "grid"), default="default",
+    parser.add_argument("--mode", choices=("tree", "grid"), default="tree",
                         help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.worker:
@@ -193,12 +201,13 @@ def main():
     models = ("bridge", "table") if args.model == "all" else (args.model,)
     rows = compare(args.repo.resolve(), args.baseline.resolve() if args.baseline else None,
                    models, args.nozzle, args.bead_diameter, args.tree_only)
-    print("model    checkout mode       beads duplicates components floating intersects below_bed seconds")
+    print("model    checkout mode       beads duplicates components floating intersects below_bed gen_sec total_sec")
     for row in rows:
         print(f"{row['model']:<8} {row['checkout']:<8} {row['mode']:<9} "
               f"{row['beads']:>6} {row['duplicate_centres']:>10} {row['components']:>10} "
               f"{row['floating_beads']:>8} {row['penetrating_beads']:>10} "
-              f"{row['beads_below_bed']:>9} {row['seconds']:>7.3f}")
+              f"{row['beads_below_bed']:>9} {row['generation_seconds']:>7.3f} "
+              f"{row['seconds']:>9.3f}")
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")

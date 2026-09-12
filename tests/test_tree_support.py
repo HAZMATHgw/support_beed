@@ -101,13 +101,12 @@ def test_shared_junction_beads_are_unique_and_short_edges_form_connected_chains(
 
 
 @pytest.mark.parametrize("name", ["bridge", "table"])
-def test_default_tree_pipeline_is_sparse_unique_and_bed_connected(name):
+def test_tree_pipeline_is_sparse_unique_and_bed_connected(name):
     contact, body = make_params(nozzle_diameter_mm=2.0, bead_diameter_mm=1.0)
-    gen = SupportGenParams(nozzle_diameter_mm=2.0,
+    gen = SupportGenParams(nozzle_diameter_mm=2.0, tree_enabled=True,
                            layer_height_mm=contact.layer_height_mm(),
                            detection_layer_height_mm=0.25, xy_clearance_mm=0.3,
                            contact_z_gap_mm=0.2, min_island_area_mm2=0.5)
-    assert gen.tree_enabled
     model = make_model(name)
     tree = generate_support(model, gen, contact, body, detail=0, verbose=False)
     grid = generate_support(model, replace(gen, tree_enabled=False), contact, body,
@@ -119,7 +118,8 @@ def test_default_tree_pipeline_is_sparse_unique_and_bed_connected(name):
     assert tree_metrics["floating_beads"] == 0
     clearance = mesh_clearance_metrics(tree.plan, gen.layer_height_mm, model)
     assert clearance["penetrating_beads"] == 0
-    assert clearance["beads_below_bed"] == 0
+    # Patch-22 intentionally presses root spheres slightly into the bed.
+    assert clearance["centres_below_bed"] == 0
     assert len(tree.mesh.faces) > 0
     assert tree.mesh.is_watertight
 
@@ -127,7 +127,7 @@ def test_default_tree_pipeline_is_sparse_unique_and_bed_connected(name):
 @pytest.mark.parametrize("name", ["bridge", "table"])
 def test_point_four_mm_nozzle_keeps_connected_collision_free_support(name):
     contact, body = make_params(nozzle_diameter_mm=0.4)
-    gen = SupportGenParams(nozzle_diameter_mm=0.4,
+    gen = SupportGenParams(nozzle_diameter_mm=0.4, tree_enabled=True,
                            layer_height_mm=contact.layer_height_mm(),
                            detection_layer_height_mm=0.25, xy_clearance_mm=0.3,
                            contact_z_gap_mm=0.2, min_island_area_mm2=0.5)
@@ -139,4 +139,4 @@ def test_point_four_mm_nozzle_keeps_connected_collision_free_support(name):
     assert metrics["floating_beads"] == 0
     clearance = mesh_clearance_metrics(tree.plan, gen.layer_height_mm, model)
     assert clearance["penetrating_beads"] == 0
-    assert clearance["beads_below_bed"] == 0
+    assert clearance["centres_below_bed"] == 0

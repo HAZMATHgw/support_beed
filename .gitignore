@@ -5,3 +5,13 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+venv/
+
+# 생성물
+*_support.stl
+*_support.3mf
+*_support.obj
+*_with_support.*
+*_beads.json
+*_layer*.png
+examples/out/

@@ -133,7 +133,10 @@ def _generate_tree_support(
 ) -> "SupportResult":
     """희소 접점과 충돌을 검사한 가지 그래프를 구슬로 변환한다."""
     from .regions import detect_overhangs
-    from .skeleton import extract_contact_points, grow_branches, skeleton_to_bead_seeds
+    from .skeleton import (
+        add_bracing, assign_hierarchical_radii, extract_contact_points,
+        grow_branches, prune_floating, settle_collisions, skeleton_to_bead_seeds,
+    )
     from .tree_collision import SliceCollision
 
     heights = [z0 + (i + 0.5) * det_h for i in range(len(det_slices))]
@@ -171,24 +174,61 @@ def _generate_tree_support(
         merge_distance=gen.branch_merge_distance_mm or contact_params.bead_diameter_mm * 6,
         max_branch_angle_deg=gen.branch_angle_deg,
         contact_z_offset=z_off,
-        bed_z=z0, bed_radius=0.5 * body_params.bead_diameter_mm,
-        contact_radius=0.5 * contact_params.bead_diameter_mm,
+        bead_radius=0.5 * max(contact_params.bead_diameter_mm, body_params.bead_diameter_mm),
     )
     if verbose:
         print(f"      골격: {skeleton.summary()}, 루트 {len(skeleton.roots())}개")
-    # 성장 과정에서 가변 반지름과 엣지 전체를 검사했다. 구슬을 개별적으로
-    # 밀어내면 사슬과 접점이 끊어지므로, 검증한 경로를 그대로 샘플링한다.
+    skipped = skeleton.skipped_contacts + skeleton.blocked_contacts
+    if skipped:
+        warnings.warn(f"트리 접점 {len(contacts)}개 중 {skipped}개는 지정한 "
+                      "구슬/여유로 배치할 수 없습니다. 미리보기에서 확인하세요.", stacklevel=2)
+    # patch-22의 구조 보강을 유지한다. 가는 사슬로 바꾸는 대신, 접점과
+    # 나무 수를 줄인 뒤 하중/세장비에 맞는 구슬 다발과 가새를 만든다.
+    if gen.adaptive_bead_size:
+        assign_hierarchical_radii(
+            skeleton, contact_params.bead_diameter_mm, body_params.bead_diameter_mm,
+            max_trunk_diameter_mm=gen.tree_max_trunk_diameter_mm,
+            slenderness=gen.tree_trunk_slenderness,
+        )
     seeds = skeleton_to_bead_seeds(
         skeleton, contact_params.bead_diameter_mm, body_params.bead_diameter_mm,
-        max_beads=limit,
+        model_slices=det_slices, heights=heights, xy_clearance=gen.xy_clearance_mm,
+        max_branch_angle_deg=gen.branch_angle_deg,
+        include_on_model=not gen.support_on_build_plate_only,
     )
+    if gen.tree_bracing:
+        braces, _, _ = add_bracing(
+            skeleton, body_params.bead_diameter_mm, det_slices, heights,
+            gen.xy_clearance_mm, max_distance_mm=gen.tree_brace_distance_mm,
+            brace_angle_deg=min(35.0, gen.overhang_angle_deg),
+        )
+        seeds += braces
+    guard_bead_count(len(seeds), limit)
+    seeds, _ = settle_collisions(seeds, mesh, gen.xy_clearance_mm,
+                                z_gap=gen.contact_z_gap_mm,
+                                model_slices=det_slices, heights=heights)
+    seeds, _ = prune_floating(seeds, mesh, z0, gen.xy_clearance_mm)
     if verbose:
         print(f"      구슬 {len(seeds)}개")
     if not seeds:
+        warnings.warn("오버행은 있지만 충돌/연결 조건을 만족하는 트리 비드를 만들지 "
+                      "못했습니다. 구슬 크기와 여유를 확인하세요.", stacklevel=2)
         return SupportResult(trimesh.Trimesh(), None, det_slices)
 
     # 구슬 좌표를 BeadPlan 형태로 담아 기존 meshing/검증 코드를 재사용한다.
     plan = BeadPlan()
+    # 접점을 없애서 개수만 줄인 결과를 성공으로 오인하지 않도록 기록한다.
+    from scipy.spatial import cKDTree
+    tip_nodes = [(n.x, n.y, n.z) for n in skeleton.nodes if n.kind == "contact"]
+    supported = 0
+    if tip_nodes:
+        distances, _ = cKDTree([seed[:3] for seed in seeds]).query(tip_nodes)
+        supported = int((distances <= contact_params.bead_diameter_mm * 0.6).sum())
+    plan.tree_stats = dict(requested_contacts=len(contacts), supported_contacts=supported,
+                           roots=len(skeleton.roots()), contact_spacing_mm=spacing)
+    if supported < len(contacts):
+        warnings.warn(f"선택한 접점 {len(contacts)}개 중 {len(contacts) - supported}개는 "
+                      "최종 비드에 연결되지 않았습니다. 지지 누락을 확인하세요.", stacklevel=2)
     bead_h = gen.layer_height_mm
     contact_centres = {(round(n.x, 7), round(n.y, 7), round(n.z, 7))
                        for n in skeleton.nodes if n.kind == "contact"}

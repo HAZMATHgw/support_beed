@@ -22,6 +22,7 @@ class BeadPlan:
     """층별 bead 배치 결과. 메쉬 생성과 좌표 내보내기가 공용으로 쓴다."""
 
     layers: List[dict] = field(default_factory=list)
+    tree_stats: dict = field(default_factory=dict)
 
 
 def plan_beads(

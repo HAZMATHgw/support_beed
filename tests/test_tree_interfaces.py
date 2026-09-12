@@ -4,6 +4,7 @@ import io
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 import warnings
 
 import pytest
@@ -82,21 +83,31 @@ def test_cli_tree_controls_and_mutually_exclusive_modes(capsys):
     args = parser.parse_args([
         "bridge.stl", "--tree-contact-spacing", "1.4",
         "--branch-angle", "30", "--branch-merge-distance", "2.6",
+        "--trunk-slenderness", "10", "--brace-distance", "3", "--no-bracing",
     ])
     assert (args.tree_contact_spacing, args.branch_angle,
             args.branch_merge_distance) == (1.4, 30.0, 2.6)
+    assert args.trunk_slenderness == 10
+    assert args.brace_distance == 3
+    assert args.no_bracing
+    defaults = parser.parse_args(["bridge.stl"])
+    assert defaults.trunk_slenderness == 8
+    assert defaults.brace_distance is None
+    assert not defaults.no_bracing
     with pytest.raises(SystemExit) as error:
         parser.parse_args(["bridge.stl", "--tree", "--grid"])
     assert error.value.code == 2
 
 
-@pytest.mark.parametrize("fields, expected", [
-    ({}, (None, 25.0, None)),
+@pytest.mark.parametrize("fields, expected, reinforcement", [
+    ({}, (None, 25.0, None), (8.0, True, None)),
     ({"tree_contact_spacing": "1.4", "branch_angle": "30",
-      "branch_merge_distance": "2.6"}, (1.4, 30.0, 2.6)),
+      "branch_merge_distance": "2.6", "trunk_slenderness": "10",
+      "tree_bracing": "0", "brace_distance": "3.0"},
+     (1.4, 30.0, 2.6), (10.0, False, 3.0)),
 ])
 def test_web_generates_downloadable_tree_and_exposes_settings_and_warnings(
-        client, bridge_stl, monkeypatch, fields, expected):
+        client, bridge_stl, monkeypatch, fields, expected, reinforcement):
     generated_params = []
     real_generate = webapp.generate_support
     warning_message = "Tree integration warning: check support contact spacing."
@@ -119,9 +130,14 @@ def test_web_generates_downloadable_tree_and_exposes_settings_and_warnings(
     assert gen.nozzle_diameter_mm == pytest.approx(0.4)
     assert (gen.tree_contact_spacing_mm, gen.branch_angle_deg,
             gen.branch_merge_distance_mm) == expected
+    assert (gen.tree_trunk_slenderness, gen.tree_bracing,
+            gen.tree_brace_distance_mm) == reinforcement
     assert payload["tree_contact_spacing_mm"] == pytest.approx(expected[0] or 0.8)
     assert payload["branch_angle_deg"] == expected[1]
     assert payload["branch_merge_distance_mm"] == pytest.approx(expected[2] or 1.2)
+    assert payload["tree_trunk_slenderness"] == reinforcement[0]
+    assert payload["tree_bracing"] is reinforcement[1]
+    assert payload["tree_brace_distance_mm"] == pytest.approx(reinforcement[2] or 3.88)
     download = client.get(payload["files"][0]["url"])
     assert download.status_code == 200
     exported = trimesh.load(io.BytesIO(download.data), file_type="stl")
@@ -129,12 +145,14 @@ def test_web_generates_downloadable_tree_and_exposes_settings_and_warnings(
     page = client.get("/").get_data(as_text=True)
     assert 'id="nozzle" value="0.4"' in page
     assert 'id="tree_enabled" checked' in page
+    assert 'id="tree_bracing" checked' in page
+    assert 'id="brace_distance"' in page
     assert 'id="r-warn"' in page and "data.notes.map" in page
 
 
 @pytest.mark.parametrize("field, value", [
     (field, value)
-    for field in ("tree_contact_spacing", "branch_merge_distance")
+    for field in ("tree_contact_spacing", "branch_merge_distance", "trunk_slenderness", "brace_distance")
     for value in ("0", "-1", "nan", "inf", "-inf")
 ] + [("branch_angle", value) for value in ("-1", "90", "nan", "inf", "-inf")])
 def test_web_invalid_tree_numbers_finish_as_input_errors(client, bridge_stl, field, value):
@@ -146,6 +164,7 @@ def test_web_invalid_tree_numbers_finish_as_input_errors(client, bridge_stl, fie
 
 @pytest.mark.parametrize("field", [
     "tree_contact_spacing", "branch_angle", "branch_merge_distance",
+    "trunk_slenderness", "brace_distance",
 ])
 def test_web_rejects_non_numeric_tree_settings_before_starting_job(client, bridge_stl, field):
     response = client.post("/api/generate", data={
@@ -172,3 +191,20 @@ def test_web_explicit_grid_selection_survives_form_parsing(client, bridge_stl, m
     })
     assert response.status_code == 202
     assert submitted_forms[0]["tree_enabled"] is False
+
+
+def test_web_empty_result_with_path_warning_reports_unresolved_support(
+        client, bridge_stl, monkeypatch):
+    warning = "트리 접점 2개의 유효한 지지 경로를 찾지 못했습니다."
+
+    def no_valid_support(*args, **kwargs):
+        warnings.warn(warning)
+        return SimpleNamespace(mesh=trimesh.Trimesh())
+
+    monkeypatch.setattr(webapp, "generate_support", no_valid_support)
+    status, payload = submit_and_wait(client, bridge_stl)
+    assert status == 422
+    assert "지원 조건을 확인" in payload["error"]
+    assert warning in payload["error"]
+    assert warning in payload["notes"]
+    assert "서포터가 필요하지 않습니다" not in payload["error"]

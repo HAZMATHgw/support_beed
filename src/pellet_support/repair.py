@@ -43,6 +43,18 @@ def _bead_points(plan, bead_h: float, z0: float) -> Tuple[np.ndarray, List[Tuple
     return (np.asarray(pts, dtype=float) if pts else np.zeros((0, 3))), where
 
 
+def _ground_top_z(z0: float, gen: SupportGenParams) -> float:
+    """비드가 실제로 '바닥'에 닿는 높이.
+
+    solid_first_layers 로 첫 층(들)을 beads 없는 통판으로 깔면, _bead_points
+    는 그 층에서 점을 하나도 못 뽑는다. 그 상태로 z0 를 그대로 접지 기준
+    삼으면, 통판 바로 위에 앉은 첫 구슬 층 전체가 '아래에 아무것도 없다'로
+    오판되어 불필요한 스티칭이나 가지치기가 일어난다. 통판 꼭대기를 새
+    기준으로 쓰면 그 위 첫 층도 원래 베드에 닿은 것과 똑같이 취급된다.
+    """
+    return z0 + gen.solid_first_layers * gen.layer_height_mm
+
+
 def _components(points: np.ndarray, pitch: float):
     """서로 닿는 비드끼리 묶은 연결 덩어리 라벨."""
     from scipy.sparse import coo_matrix
@@ -72,10 +84,11 @@ def analyze_connectivity(plan, gen: SupportGenParams,
         return {"beads": 0, "components": 0, "grounded_ratio": 1.0, "largest_ratio": 1.0}
     ncomp, labels = _components(pts, contact.pitch_mm())
     sizes = np.bincount(labels, minlength=ncomp)
+    ground_z = _ground_top_z(z0, gen)
     grounded = 0
     for comp in range(ncomp):
         zmin = pts[labels == comp][:, 2].min()
-        if zmin <= z0 + r0 * 1.5:
+        if zmin <= ground_z + r0 * 1.5:
             grounded += int(sizes[comp])
     return {
         "beads": int(len(pts)),
@@ -195,6 +208,7 @@ def repair_connectivity(
     r0 = 0.5 * contact.bead_diameter_mm
     n_det = len(det_slices)
     added_total = 0
+    ground_z = _ground_top_z(z0, gen)
 
     # 층별 '모델 + 안전여유' 를 미리 만들어 둔다. 이어 붙일 비드가 모델을
     # 파고들지 않는지 검사하는 데 쓴다.
@@ -224,14 +238,14 @@ def repair_connectivity(
         if len(pts) == 0:
             break
         ncomp, labels = _components(pts, pitch)
-        if ncomp <= 1 and pts[:, 2].min() <= z0 + r0 * 1.5:
+        if ncomp <= 1 and pts[:, 2].min() <= ground_z + r0 * 1.5:
             break
 
         # 접지하지 않은 덩어리 찾기
         floating: List[int] = []
         for comp in range(ncomp):
             zmin = pts[labels == comp][:, 2].min()
-            if zmin > z0 + r0 * 1.5:
+            if zmin > ground_z + r0 * 1.5:
                 floating.append(comp)
         if not floating:
             break
@@ -298,6 +312,7 @@ def prune_weakly_connected(
     r0 = 0.5 * contact.bead_diameter_mm
     radius = max(contact.pitch_mm(), contact.vertical_neighbor_distance_mm()) * 1.02
     removed_total = 0
+    ground_z = _ground_top_z(z0, gen)
 
     for _ in range(max_rounds):
         pts, where = _bead_points(plan, bead_h, z0)
@@ -309,7 +324,7 @@ def prune_weakly_connected(
             np.bincount(pairs.ravel(), minlength=len(pts))
             if len(pairs) else np.zeros(len(pts), dtype=int)
         )
-        on_bed = pts[:, 2] <= z0 + r0 * 1.5
+        on_bed = pts[:, 2] <= ground_z + r0 * 1.5
         # 베드에 얹힌 구슬은 아래를 베드가 받쳐 주므로 기준을 낮춘다. 다만
         # 이웃이 아예 없으면 위로 아무것도 전달하지 못하므로 남길 이유가 없다.
         needed = np.where(on_bed, 1, min_contacts)

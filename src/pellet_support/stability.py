@@ -249,6 +249,18 @@ def prune_unsupported_beads(plan, gen: SupportGenParams,
     tree = None
     dirty = True
 
+    # solid_first_layers 로 첫 층(들)을 통판으로 깔면 beads 리스트가 비어
+    # 있어 아래 루프가 그냥 건너뛴다. 그러면 그 통판 바로 위에 앉은 첫 구슬
+    # 층은 kept_pts 가 텅 빈 채로 검사돼 '아래에 아무것도 없다'로 오판되고,
+    # 전부 제거된 뒤 그 위층까지 연쇄적으로 무너진다(실측: 구슬 10만개 이상
+    # 전부 삭제). 통판의 꼭대기 높이를 미리 구해 그 위 첫 층도 베드에 닿은
+    # 것과 똑같이 취급한다.
+    solid_top_z = None
+    if gen.solid_first_layers > 0 and len(plan.layers) >= gen.solid_first_layers:
+        solid_layer = plan.layers[gen.solid_first_layers - 1]
+        if solid_layer["solid"] is not None:
+            solid_top_z = solid_layer["z_bottom"] + gen.layer_height_mm
+
     for layer in plan.layers:
         if not layer["beads"]:
             continue
@@ -261,6 +273,8 @@ def prune_unsupported_beads(plan, gen: SupportGenParams,
         # 구 중심이 반지름 이내면 베드에 닿은 것으로 본다.
         max_radius = 0.5 * max(b["d"] for b in layer["beads"])
         on_bed = zc <= max_radius * 1.05
+        if not on_bed and solid_top_z is not None:
+            on_bed = (zc - max_radius) <= solid_top_z + 1e-6
 
         if not on_bed:
             if dirty and kept_pts:

@@ -176,6 +176,9 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
             tree_contact_spacing_mm=form["tree_contact_spacing"],
             branch_angle_deg=form["branch_angle"],
             branch_merge_distance_mm=form["branch_merge_distance"],
+            tree_trunk_slenderness=form["trunk_slenderness"],
+            tree_bracing=form["tree_bracing"],
+            tree_brace_distance_mm=form["brace_distance"],
             fallback_solid=not form["no_fallback_solid"],
             max_layers=form["max_layers"],
         )
@@ -208,6 +211,12 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
         notes = [str(w.message) for w in caught]
 
         if result.mesh.is_empty:
+            if notes:
+                set_state("error", error=(
+                    "설정된 조건으로 서포터를 생성하지 못했습니다. "
+                    "지지 경로와 간격 등 지원 조건을 확인하세요.\n" + "\n".join(notes)
+                ), notes=notes, http_status=422)
+                return
             set_state("error", error=(
                 "이 모델에는 서포터가 필요하지 않습니다. "
                 "오버행 각도를 올려서 다시 시도해 보세요."
@@ -262,6 +271,7 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
             measured=stats,
             notes=notes,
             tree_enabled=gen.tree_enabled,
+            tree_stats=result.plan.tree_stats,
             tree_contact_spacing_mm=(gen.tree_contact_spacing_mm
                                      if gen.tree_contact_spacing_mm is not None
                                      else contact.bead_diameter_mm * 4.0),
@@ -269,6 +279,11 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
             branch_merge_distance_mm=(gen.branch_merge_distance_mm
                                       if gen.branch_merge_distance_mm is not None
                                       else contact.bead_diameter_mm * 6.0),
+            tree_trunk_slenderness=gen.tree_trunk_slenderness,
+            tree_bracing=gen.tree_bracing,
+            tree_brace_distance_mm=(gen.tree_brace_distance_mm
+                                   if gen.tree_brace_distance_mm is not None
+                                   else body.bead_diameter_mm * 20.0),
             auto_tuned=(None if tuning is None else {
                 "bead_diameter": round(tuning.chosen.bead_diameter_mm, 3),
                 "fillable": round(tuning.chosen.fillable_fraction, 3),
@@ -319,6 +334,8 @@ def api_generate():
         tree_contact_spacing = _form_optional_float("tree_contact_spacing", strict=True)
         branch_angle = _form_optional_float("branch_angle", strict=True)
         branch_merge_distance = _form_optional_float("branch_merge_distance", strict=True)
+        trunk_slenderness = _form_optional_float("trunk_slenderness", strict=True)
+        brace_distance = _form_optional_float("brace_distance", strict=True)
     except InvalidParameterError as exc:
         return jsonify(error=str(exc)), 400
 
@@ -356,6 +373,9 @@ def api_generate():
         tree_contact_spacing=tree_contact_spacing,
         branch_angle=25.0 if branch_angle is None else branch_angle,
         branch_merge_distance=branch_merge_distance,
+        trunk_slenderness=8.0 if trunk_slenderness is None else trunk_slenderness,
+        tree_bracing=_form_bool("tree_bracing", default=True),
+        brace_distance=brace_distance,
         no_fallback_solid=_form_bool("no_fallback_solid"),
         max_layers=_form_int("max_layers", 4000),
         with_model=_form_bool("with_model"),
@@ -387,7 +407,8 @@ def api_status(job):
     if state["status"] == "running":
         return jsonify(status="running", stage=state.get("stage", "")), 200
     if state["status"] == "error":
-        return jsonify(status="error", error=state.get("error", "알 수 없는 오류")), \
+        return jsonify(status="error", error=state.get("error", "알 수 없는 오류"),
+                       notes=state.get("notes", [])), \
             state.get("http_status", 500)
     # done
     return jsonify(status="done", **state["payload"]), 200

@@ -102,6 +102,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--branch-merge-distance", type=float, default=None, metavar="MM",
                    help="트리 가지를 병합할 최대 수평 거리 (mm). "
                         "비우면 구슬 지름의 6배")
+    s.add_argument("--trunk-slenderness", type=float, default=8.0,
+                   help="트리 모드 트렁크 세장비 상한(높이/굵기). 트렁크가 아래로 "
+                        "갈수록 이 비율로 굵어지는 구슬 다발이 된다. 작을수록 튼튼하고 "
+                        "구슬이 많이 든다(기본 8)")
+    s.add_argument("--no-bracing", action="store_true",
+                   help="트리 모드에서 이웃 트렁크끼리 베드 연결 + X 가새로 잇지 않는다")
+    s.add_argument("--brace-distance", type=float, default=None,
+                   help="트리 모드에서 서로 이을 트렁크 사이 최대 거리(mm). "
+                        "비우면 몸통 구슬 지름의 20배")
     s.add_argument("--build-plate-only", action="store_true")
     s.add_argument("--allow-internal-supports", action="store_true",
                    help="모델 내부의 닫힌 공동에도 서포터를 채움 "
@@ -223,6 +232,9 @@ def _run(argv=None) -> int:
         tree_contact_spacing_mm=args.tree_contact_spacing,
         branch_angle_deg=args.branch_angle,
         branch_merge_distance_mm=args.branch_merge_distance,
+        tree_trunk_slenderness=args.trunk_slenderness,
+        tree_bracing=not args.no_bracing,
+        tree_brace_distance_mm=args.brace_distance,
         fallback_solid=not args.no_fallback_solid,
         max_layers=args.max_layers,
         max_beads=args.max_beads,
@@ -308,7 +320,8 @@ def _run(argv=None) -> int:
         if li < 0:
             cand = [l["layer"] for l in result.plan.layers if l["beads"]]
             li = cand[-1] if cand else 0
-        li = max(0, min(li, len(result.plan.layers) - 1))
+        # 트리 계획은 빈 층을 생략하므로 층 번호와 배열 인덱스가 다르다.
+        li = min((layer["layer"] for layer in result.plan.layers), key=lambda n: abs(n - li))
         out3 = f"{root}_layer{li}.png"
         export_preview(result.plan, result.slices, li, out3)
         print(f"      미리보기 저장: {out3}")

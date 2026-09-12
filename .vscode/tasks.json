@@ -1,0 +1,31 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "설치 (개발 모드)",
+      "type": "shell",
+      "command": "${command:python.interpreterPath} -m pip install -e \".[dev,web]\"",
+      "problemMatcher": []
+    },
+    {
+      "label": "웹 UI 실행",
+      "type": "shell",
+      "command": "${command:python.interpreterPath} -m pellet_support.webapp",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "테스트",
+      "type": "shell",
+      "command": "${command:python.interpreterPath} -m pytest -v",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "예제 모델 만들기",
+      "type": "shell",
+      "command": "${command:python.interpreterPath} examples/make_test_models.py",
+      "problemMatcher": []
+    }
+  ]
+}

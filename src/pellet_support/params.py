@@ -254,8 +254,8 @@ class SupportGenParams:
     #: 꺼낼 방법이 없어서 재료와 시간만 버리고 무게만 늘어난다.
     #: 나뭇가지(트리) 골격 모드. 켜면 '영역을 격자로 채우는' 방식 대신
     #: 접촉점 -> 가지 -> 병합 -> 베드 골격을 먼저 만들고 그것을 구슬로
-    #: 표현한다. 격자 충전은 tree_enabled=False 로 선택할 수 있다.
-    tree_enabled: bool = True
+    #: 표현한다. CLI/웹은 트리가 기본이며 라이브러리는 기존 기본값을 유지한다.
+    tree_enabled: bool = False
     #: 트리 접점 간격(mm). None 이면 접촉 구슬 지름의 4배.
     #: 크게 할수록 접점과 가지가 줄지만 오버행의 지지 간격도 넓어진다.
     tree_contact_spacing_mm: Optional[float] = None
@@ -266,6 +266,16 @@ class SupportGenParams:
     branch_merge_distance_mm: Optional[float] = None
     #: 트렁크는 굵게, 말단은 가늘게(떠받치는 접촉점 수의 제곱근에 비례).
     adaptive_bead_size: bool = True
+    #: 트렁크 세장비 상한(위로 서 있는 높이 / 그 높이에서의 트렁크 굵기).
+    #: 트렁크는 아래로 갈수록 이 비율로 굵어지는 구슬 다발(원추형)이 된다.
+    #: 작을수록 튼튼하고 구슬이 많이 든다.
+    tree_trunk_slenderness: float = 8.0
+    #: 트렁크 최대 굵기(mm). None 이면 몸통 구슬 지름의 15배.
+    tree_max_trunk_diameter_mm: Optional[float] = None
+    #: 이웃 트렁크끼리 베드 연결 + 45° X 가새로 서로 붙잡게 한다.
+    tree_bracing: bool = True
+    #: 서로 이을 트렁크 사이 최대 거리(mm). None 이면 몸통 구슬 지름의 20배.
+    tree_brace_distance_mm: Optional[float] = None
     allow_internal_supports: bool = False
     #: 구슬을 꺼낼 수 있다고 볼 최소 통로 폭(mm). 이보다 좁은 창문·틈으로는
     #: 구슬이 빠져나오지 못하므로 그 안쪽은 닫힌 공동으로 취급한다.
