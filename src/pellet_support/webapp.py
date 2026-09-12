@@ -187,7 +187,9 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
         if form["auto_tune"] and form["bead_diameter"] is None:
             set_state("running", stage="구슬 크기 자동 선택")
             tuning = auto_tune_bead_diameter(
-                mesh, gen, contact, target_fill=form["auto_target"])
+                mesh, gen, contact, target_fill=form["auto_target"],
+                progress_callback=lambda message: set_state("running", stage=message),
+            )
             contact, body = make_params(
                 nozzle_diameter_mm=form["nozzle"],
                 bead_diameter_mm=tuning.chosen.bead_diameter_mm,
@@ -207,6 +209,7 @@ def _run_generation_job(job, workdir, in_path, stem, ext, out_ext, form):
             result = generate_support(
                 mesh, gen, contact, body,
                 detail=form["sphere_detail"], verbose=False,
+                progress_callback=lambda message: set_state("running", stage=message),
             )
         notes = [str(w.message) for w in caught]
 

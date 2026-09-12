@@ -28,12 +28,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, replace
-from typing import List, Optional
+from typing import Callable, List, Optional
 
 from .params import SupportBeadParams, SupportGenParams
-from .regions import build_support_regions
+from .regions import build_support_regions, detect_overhangs
 from .slicing import clean, slice_model
-from .validation import fillable_fraction
+from .validation import (fillable_fraction, validate_bead_params,
+                         validate_gen_params, validate_mesh)
 
 
 @dataclass
@@ -52,6 +53,7 @@ class TuningResult:
     met_target: bool
     #: 남은 틈을 메우는 데 쓸 수 있는 더 작은 구슬 지름들
     filler_diameters: List[float] = None
+    tree_enabled: bool = False
 
     def summary(self) -> str:
         lines = [
@@ -60,7 +62,9 @@ class TuningResult:
             f"  기본 구슬이 채우는 영역 {self.chosen.fillable_fraction * 100:.0f}% "
             f"/ 예상 {self.chosen.estimated_beads:,}개",
         ]
-        if self.filler_diameters:
+        if self.tree_enabled:
+            lines.append("  트리 예상 개수는 가지 병합·몸통 보강 전 근사치입니다.")
+        elif self.filler_diameters:
             sizes = ", ".join(f"{d:.2f}mm" for d in self.filler_diameters)
             lines.append(f"  남은 틈은 더 작은 구슬로 메움: {sizes}")
         else:
@@ -83,6 +87,7 @@ def auto_tune_bead_diameter(
     target_fill: float = 0.75,
     max_beads: Optional[int] = None,
     steps: int = 8,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> TuningResult:
     """모델과 노즐에 맞는 구슬 지름을 고른다.
 
@@ -91,6 +96,10 @@ def auto_tune_bead_diameter(
     아무 후보도 목표를 만족하지 못하면 가장 품질이 좋은 후보를 고르고
     ``met_target=False`` 로 알린다.
     """
+    validate_mesh(mesh)
+    validate_gen_params(gen)
+    validate_bead_params(base_contact)
+    report = progress_callback or (lambda stage: None)
     nozzle = gen.nozzle_diameter_mm
     min_bead = gen.min_bead_diameter_mm or (nozzle * gen.min_bead_to_nozzle_ratio)
     max_bead = max(min_bead, nozzle * 0.5)
@@ -98,34 +107,54 @@ def auto_tune_bead_diameter(
         steps = 2
 
     # 큰 것부터 작은 것까지 균등하게 후보를 만든다.
-    diameters = [
+    diameters = list(dict.fromkeys(
         max_bead - (max_bead - min_bead) * i / (steps - 1) for i in range(steps)
-    ]
+    ))
+
+    # 형상 탐지는 후보 지름과 분리한다. 예전에는 후보마다 전체 메시를
+    # 다시 자르고 아래층까지 영역을 확장해, 작은 노즐에서 수 분씩 걸렸다.
+    # 모든 후보를 같은 단면으로 비교하고 명시한 탐지 해상도도 지킨다.
+    det_h = gen.detection_layer_height_mm or min(0.4, gen.layer_height_mm)
+    det_h = max(det_h, float(mesh.extents[2]) / gen.max_detection_layers)
+    report("구슬 크기 자동 선택 · 모델 단면 계산 (1회)")
+    det_slices, _ = slice_model(mesh, det_h, gen.max_detection_layers)
+    report("구슬 크기 자동 선택 · 지지 영역 분석")
+    if gen.tree_enabled:
+        # 트리는 오버행 접점을 가지로 잇는다. 격자처럼 전체 지지 부피를
+        # 만들 필요가 없으며, 그 부피로 개수를 추정하면 크게 부풀려진다.
+        analysis_gen = replace(gen, removal_opening_mm=max_bead)
+        support = detect_overhangs(det_slices, analysis_gen, det_h)
+    else:
+        support, _ = build_support_regions(det_slices, gen, det_h)
+    regions = [clean(s) for s in support]
+    total_area = sum(r.area for r in regions if not r.is_empty)
+    # 트리 개수는 병합/몸통 보강 전 수직 가지 길이의 근사치다.
+    # 실제 배치 개수나 최종 연결 품질의 보증으로 쓰지는 않는다.
+    height_weighted_area = sum(
+        r.area * (i + 0.5) * det_h for i, r in enumerate(regions)
+        if not r.is_empty
+    )
 
     candidates: List[TuningCandidate] = []
-    for d in diameters:
+    for index, d in enumerate(diameters, 1):
+        report(f"구슬 크기 자동 선택 · 후보 {index}/{len(diameters)} ({d:.3f} mm)")
         probe = replace(base_contact, bead_diameter_mm=d)
         layer_h = probe.layer_height_mm()
         if layer_h <= 0:
             continue
-        probe_gen = replace(gen, layer_height_mm=layer_h)
-        det_h = probe_gen.detection_height_mm() if hasattr(
-            probe_gen, "detection_height_mm") else min(0.4, layer_h)
-        try:
-            det_slices, _ = slice_model(mesh, det_h, gen.max_detection_layers)
-            support, _ = build_support_regions(det_slices, probe_gen, det_h)
-        except Exception:
-            continue
-        regions = [clean(s) for s in support]
         frac = fillable_fraction(regions, d)
 
         # 구슬 수 어림: 채울 수 있는 면적 / 격자 셀 면적
         pitch = probe.pitch_mm()
         cell = math.sqrt(3.0) / 2.0 * pitch * pitch
-        area = sum(r.area for r in regions if not r.is_empty) * frac
+        area = total_area * frac
         # 탐지 층 기준 면적이므로 구슬 층 간격으로 환산한다
         scale = det_h / layer_h if layer_h > 0 else 1.0
-        est = int(area * scale / cell) if cell > 0 else 0
+        if gen.tree_enabled:
+            spacing = gen.tree_contact_spacing_mm or 4.0 * d
+            est = int(height_weighted_area * frac / (spacing * spacing * layer_h))
+        else:
+            est = int(area * scale / cell) if cell > 0 else 0
 
         candidates.append(TuningCandidate(d, frac, est, layer_h))
 
@@ -149,6 +178,10 @@ def auto_tune_bead_diameter(
     # 따라서 보너스는 아주 보수적으로만 준다.
     def effective_fill(cand: TuningCandidate) -> float:
         frac = cand.fillable_fraction
+        if gen.tree_enabled:
+            # 트리 생성은 격자의 세분 충전을 쓰지 않는다. 없는 보너스로
+            # 목표 달성을 보고하거나 작은 접점용 구슬을 배제하지 않는다.
+            return frac
         d = cand.bead_diameter_mm
         bonus = 0.0
         for _ in range(gen.fill_generations):
@@ -161,7 +194,7 @@ def auto_tune_bead_diameter(
     usable = [c for c in candidates
               if effective_fill(c) >= target_fill
               and (max_beads is None or c.estimated_beads <= max_beads)]
-    usable_hr = [c for c in usable if c in with_headroom]
+    usable_hr = [c for c in usable if c in with_headroom] if not gen.tree_enabled else []
     if usable_hr:
         usable = usable_hr
     if usable:
@@ -184,10 +217,10 @@ def auto_tune_bead_diameter(
     # 기본 구슬이 이미 최소 크기면 여유가 없어 틈이 그대로 남는다.
     fillers: List[float] = []
     d = chosen.bead_diameter_mm
-    for _ in range(gen.fill_generations):
+    for _ in range(0 if gen.tree_enabled else gen.fill_generations):
         d *= gen.fill_shrink
         if d < min_bead:
             break
         fillers.append(round(d, 3))
 
-    return TuningResult(chosen, candidates, target_fill, met, fillers)
+    return TuningResult(chosen, candidates, target_fill, met, fillers, gen.tree_enabled)

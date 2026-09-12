@@ -7,7 +7,7 @@ import math
 
 import warnings
 from dataclasses import replace
-from typing import Dict, NamedTuple, Optional, Tuple
+from typing import Callable, Dict, NamedTuple, Optional, Tuple
 
 import trimesh
 from shapely.ops import unary_union
@@ -130,6 +130,7 @@ def _generate_tree_support(
     z0: float,
     detail: int,
     verbose: bool,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> "SupportResult":
     """희소 접점과 충돌을 검사한 가지 그래프를 구슬로 변환한다."""
     from .regions import detect_overhangs
@@ -139,7 +140,9 @@ def _generate_tree_support(
     )
     from .tree_collision import SliceCollision
 
+    report_progress = progress_callback or (lambda message: None)
     heights = [z0 + (i + 0.5) * det_h for i in range(len(det_slices))]
+    report_progress("오버행 탐색")
     overhang = detect_overhangs(det_slices, gen, det_h)
     spacing = gen.tree_contact_spacing_mm or contact_params.bead_diameter_mm * 4.0
     limit = min(gen.max_beads or bead_budget(detail), bead_budget(detail))
@@ -148,6 +151,7 @@ def _generate_tree_support(
     collision = SliceCollision(det_slices, heights, gen.xy_clearance_mm)
     # 기둥 옆의 대표점이 충돌해서 가지를 잃지 않도록, 구슬이 들어갈 수
     # 있는 부분을 먼저 구한 후 그 내부에서 대표점을 고른다.
+    report_progress("트리 접점 선택")
     contact_regions = [collision.free_region(region, heights[i] - z_off,
                                              0.5 * contact_params.bead_diameter_mm)
                        if not region.is_empty else region
@@ -168,6 +172,7 @@ def _generate_tree_support(
         return SupportResult(trimesh.Trimesh(), None, det_slices)
 
     # 높이는 단면 중앙이므로, 실제 아랫면은 반 탐지층 아래에 있다.
+    report_progress("트리 가지 성장·병합")
     skeleton = grow_branches(
         contacts, det_slices, heights, replace(gen, max_beads=limit),
         step_h=max(det_h * 3, contact_params.bead_diameter_mm * 0.5),
@@ -185,11 +190,13 @@ def _generate_tree_support(
     # patch-22의 구조 보강을 유지한다. 가는 사슬로 바꾸는 대신, 접점과
     # 나무 수를 줄인 뒤 하중/세장비에 맞는 구슬 다발과 가새를 만든다.
     if gen.adaptive_bead_size:
+        report_progress("트렁크 굵기 계산")
         assign_hierarchical_radii(
             skeleton, contact_params.bead_diameter_mm, body_params.bead_diameter_mm,
             max_trunk_diameter_mm=gen.tree_max_trunk_diameter_mm,
             slenderness=gen.tree_trunk_slenderness,
         )
+    report_progress("트리 구슬 배치")
     seeds = skeleton_to_bead_seeds(
         skeleton, contact_params.bead_diameter_mm, body_params.bead_diameter_mm,
         model_slices=det_slices, heights=heights, xy_clearance=gen.xy_clearance_mm,
@@ -197,6 +204,7 @@ def _generate_tree_support(
         include_on_model=not gen.support_on_build_plate_only,
     )
     if gen.tree_bracing:
+        report_progress("트리 가새 보강")
         braces, _, _ = add_bracing(
             skeleton, body_params.bead_diameter_mm, det_slices, heights,
             gen.xy_clearance_mm, max_distance_mm=gen.tree_brace_distance_mm,
@@ -204,9 +212,11 @@ def _generate_tree_support(
         )
         seeds += braces
     guard_bead_count(len(seeds), limit)
+    report_progress("모델 충돌 보정")
     seeds, _ = settle_collisions(seeds, mesh, gen.xy_clearance_mm,
                                 z_gap=gen.contact_z_gap_mm,
                                 model_slices=det_slices, heights=heights)
+    report_progress("떠 있는 구슬 정리")
     seeds, _ = prune_floating(seeds, mesh, z0, gen.xy_clearance_mm)
     if verbose:
         print(f"      구슬 {len(seeds)}개")
@@ -250,6 +260,7 @@ def _generate_tree_support(
             "beads": by_layer[li],
         })
 
+    report_progress("서포터 메쉬 생성")
     support_mesh = plan_to_mesh(plan, gen, detail=detail)
     return SupportResult(support_mesh, plan, det_slices)
 
@@ -261,7 +272,10 @@ def generate_support(
     body_params: SupportBeadParams,
     detail: int = 1,
     verbose: bool = True,
+    progress_callback: Optional[Callable[[str], None]] = None,
 ) -> SupportResult:
+    """서포터를 만들고 선택적 콜백에 실제 계산 단계의 이름을 전달한다."""
+    report_progress = progress_callback or (lambda message: None)
     # --- 0) 검증: 조용히 틀린 결과를 내느니 명확한 에러로 막는다 -------------
     validate_mesh(mesh)
     validate_bead_params(contact_params, "인터페이스 구슬")
@@ -291,6 +305,7 @@ def generate_support(
     # 필요로 하는지는 모델 형상의 문제이지 펠릿 크기와 무관해야 한다.
     det_h = gen.detection_layer_height_mm or min(0.4, gen.layer_height_mm)
     det_h = max(det_h, float(mesh.extents[2]) / gen.max_detection_layers)
+    report_progress("모델 단면 계산")
     det_slices, _ = slice_model(mesh, det_h, gen.max_detection_layers)
     if verbose:
         print(f"      탐지 슬라이싱: {len(det_slices)}층 @ {det_h:.3f}mm")
@@ -304,7 +319,9 @@ def generate_support(
         return _generate_tree_support(
             mesh, gen, contact_params, body_params, det_slices, det_h,
             z0=float(mesh.bounds[0][2]), detail=detail, verbose=verbose,
+            progress_callback=progress_callback,
         )
+    report_progress("격자 서포터 영역 계산")
     support, contact = build_support_regions(det_slices, gen, det_h)
     if sum(1 for s in support if not clean(s).is_empty) == 0:
         return SupportResult(trimesh.Trimesh(), None, det_slices)
@@ -367,6 +384,7 @@ def generate_support(
         return clean(clean(region).difference(blocked))
 
     bead_support, bead_contact = [], []
+    report_progress("격자 구슬 배치")
     # 세대별[층] 형태. 0번이 기본 구슬, 1번부터 세분 구슬(점점 작아짐).
     bead_support_by_gen = [[] for _ in gen_diameters]
     for j in range(n_bead):
@@ -411,6 +429,7 @@ def generate_support(
     # 정작 받쳐야 할 곳이 통째로 비어 서포터 역할을 못 한다. 아래로 기둥을
     # 내려 베드나 모델까지 연결하면 구조를 유지하면서 빈 구간만 메울 수 있다.
     if gen.stitch_floating:
+        report_progress("끊긴 구슬 연결")
         try:
             added = repair_connectivity(
                 plan, gen, contact_params, det_slices, det_h,
@@ -422,6 +441,7 @@ def generate_support(
             pass  # scipy 가 없으면 이 복구 단계만 건너뛴다
 
     # 아래에 받쳐줄 것이 없는 구슬은 실제로 인쇄되지 않고 노즐에 끌려다닌다.
+    report_progress("구슬 연결 상태 정리")
     if gen.prune_unsupported:
         try:
             dropped = prune_unsupported_beads(plan, gen, contact_params, mesh)
@@ -478,4 +498,5 @@ def generate_support(
 
     if verbose:
         print(f"      bead {sum(len(l['beads']) for l in plan.layers)}개")
+    report_progress("서포터 메쉬 생성")
     return SupportResult(plan_to_mesh(plan, gen, detail), plan, det_slices)
