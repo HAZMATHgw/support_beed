@@ -103,21 +103,29 @@ def mesh_clearance_metrics(plan, layer_height, mesh):
 
     records = bead_records(plan, layer_height)
     if not records:
-        return dict(penetrating_beads=0, beads_below_bed=0, min_bead_bottom_mm=None,
-                    centres_below_bed=0, min_bead_centre_z_mm=None)
+        return dict(penetrating_beads=0, max_penetration_mm=0.0, beads_below_bed=0,
+                    min_bead_bottom_mm=None, centres_below_bed=0,
+                    min_bead_centre_z_mm=None)
     data = np.asarray(records)
     centres, radii = data[:, :3], data[:, 3] * 0.5
     query = trimesh.proximity.ProximityQuery(mesh)
     penetrations = 0
+    max_depth = 0.0
     for start in range(0, len(centres), 512):
         batch = centres[start:start + 512]
         _, surface_distance, _ = query.on_surface(batch)
+        batch_radii = radii[start:start + 512]
         inside = query.signed_distance(batch) > 1e-6
-        overlaps = surface_distance < radii[start:start + 512] - 1e-6
-        penetrations += int(np.count_nonzero(inside | overlaps))
+        depth = batch_radii - surface_distance
+        overlaps = depth > 1e-6
+        hit = inside | overlaps
+        penetrations += int(np.count_nonzero(hit))
+        if np.any(hit):
+            max_depth = max(max_depth, float(depth[hit].max()))
     bottoms = centres[:, 2] - radii
     bed_z = float(mesh.bounds[0, 2])
     return dict(penetrating_beads=penetrations,
+                max_penetration_mm=round(max_depth, 7),
                 beads_below_bed=int(np.count_nonzero(bottoms < bed_z - 1e-6)),
                 min_bead_bottom_mm=round(float(bottoms.min()), 7),
                 centres_below_bed=int(np.count_nonzero(centres[:, 2] < bed_z - 1e-6)),

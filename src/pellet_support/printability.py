@@ -264,3 +264,113 @@ def repair_support_paths(seeds, mesh, bed_z, bead_diameter, xy_clearance,
                         _grow_supported(graph, supported, [j])
             break
     return list(seeds) + added, len(added)
+
+
+def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
+                       embed=0.0, max_beads=None):
+    """Stack beads up to the real overhang surface under each leaf contact.
+
+    A tree contact's height comes from one representative overhang sample,
+    but wider contact spacing (used to cut bead counts) makes that sample
+    less likely to match the true local ceiling height at the exact XY where
+    the branch actually lands. The result is a leaf that stops short of the
+    surface it is meant to hold up, sometimes by several millimetres.
+
+    The support must actually touch the model to hold it up, so the fix
+    lands the final bead ``embed`` into the surface (the same idea as
+    neighbouring beads pressing into each other) rather than short of it —
+    a real, if shallow, joint instead of a gap with nothing to bridge. This
+    also closes the small by-design clearance every contact is placed with
+    (not just the occasional large miss): when the shortfall fits within one
+    bead's reach, the existing top bead is lifted in place rather than
+    stacking a near-duplicate on top of it; a chain of new beads is only
+    inserted when the gap is too tall for a single bead to bridge.
+
+    ``targets`` is a sequence of ``(x, y, expected_z)`` — the contact's
+    original (pre-offset) overhang height, used only to aim the search; the
+    real surface is found with a ray cast directly above the branch's own
+    landing point, not the target's nominal XY.
+    """
+    if not len(seeds) or not len(targets) or mesh is None:
+        return list(seeds), 0
+    beads = np.asarray(seeds, dtype=float)
+    tree = cKDTree(beads[:, :2])
+    radius = 0.5 * bead_diameter
+    step = 0.88 * bead_diameter
+    budget = max_beads if max_beads is not None else 2_000_000
+    pq = mesh.nearest
+    added = []
+    moved = {}
+    point_safety = {}
+
+    def check_points(points):
+        result = np.ones(len(points), dtype=bool)
+        required = radius + xy_clearance
+        for start in range(0, len(points), 256):
+            p = points[start:start + 256]
+            distance = pq.on_surface(p)[1]
+            result[start:start + len(p)] = ((distance >= required - 1e-7)
+                                            & (pq.signed_distance(p) <= 1e-7))
+        return result
+
+    def safe_path(path):
+        keys = [tuple(point[:3]) for point in path]
+        missing = list(dict.fromkeys(key for key in keys if key not in point_safety))
+        if missing:
+            point_safety.update(zip(missing, check_points(np.asarray(missing))))
+        return all(point_safety[key] for key in keys)
+
+    for x, y, expected_z in targets:
+        nearby = tree.query_ball_point([x, y], bead_diameter * 2.0)
+        if not nearby:
+            continue
+        top_idx = max(nearby, key=lambda j: beads[j, 2])
+        top = beads[top_idx, :3]
+        # A ray from the branch's own landing XY finds the surface it is
+        # actually closest to, which is what matters for the print gap.
+        locations, _, faces = mesh.ray.intersects_location(
+            [[top[0], top[1], top[2]]], [[0.0, 0.0, 1.0]], multiple_hits=True)
+        if not len(locations):
+            continue
+        # A ray travelling up enters the solid through the overhang's
+        # underside, so the surface we want has a downward-facing normal —
+        # not upward, which would be the top of something the ray exits.
+        normals = mesh.face_normals[faces]
+        downward = normals[:, 2] <= -math.sqrt(0.5) + 1e-9
+        candidates = locations[downward, 2]
+        if not len(candidates):
+            continue
+        # The intended ceiling is the closest downward-facing hit to the
+        # detection sample; a much farther one is unrelated geometry.
+        surface_z = min(candidates, key=lambda z: abs(z - expected_z))
+        if abs(surface_z - expected_z) > 3.0 * bead_diameter:
+            continue
+        target_top = surface_z + embed
+        target_centre_z = target_top - radius
+        gap = target_centre_z - top[2]
+        if gap <= 1e-9:
+            continue
+        if gap <= step:
+            # The base placement left only the usual by-design clearance
+            # short of the surface. Lift that same bead into a shallow
+            # embed rather than stacking a near-duplicate bead a fraction
+            # of a millimetre above it.
+            beads[top_idx, 2] = target_centre_z
+            moved[top_idx] = target_centre_z
+            continue
+        count = max(1, int(math.ceil(gap / step)))
+        if len(seeds) + len(added) + count > budget:
+            continue
+        path = [(float(top[0]), float(top[1]),
+                float(top[2] + gap * (i / count)), bead_diameter)
+                for i in range(1, count + 1)]
+        # The last bead is meant to press into the surface by design, so
+        # only the beads leading up to it are checked for stray collisions.
+        path, final = path[:-1], path[-1:]
+        if path and not safe_path(path):
+            continue
+        added.extend(path)
+        added.extend(final)
+    result = [(x, y, moved[i], d) if i in moved else (x, y, z, d)
+              for i, (x, y, z, d) in enumerate(seeds)]
+    return result + added, len(added) + len(moved)

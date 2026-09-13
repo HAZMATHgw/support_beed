@@ -146,6 +146,13 @@ def _generate_tree_support(
     overhang = detect_overhangs(det_slices, gen, det_h)
     spacing = gen.tree_contact_spacing_mm or contact_params.bead_diameter_mm * 4.0
     limit = min(gen.max_beads or bead_budget(detail), bead_budget(detail))
+    # 가지 성장·충돌 회피(SliceCollision/_SliceField)는 접촉 구슬이 천장과
+    # '떨어져' 있다고 가정하고 자리를 찾는다 — z_off 를 줄여 여기서부터
+    # 파고들게 하면, 검사에 쓰는 층 자체가 천장 슬래브와 겹쳐 그 슬래브의
+    # 모델 단면을 '충돌'로 보고 접점 자리를 통째로 지워버린다(빈 서포터).
+    # 그래서 이 값은 예전 그대로 두고, 실제 파고듦은 아래 close_ceiling_gaps
+    # 에서 충돌 회피가 다 끝난 뒤 마지막 한 번만 적용한다.
+    embed = contact_params.lattice_overlap_ratio * contact_params.bead_diameter_mm
     gap = max(gen.contact_z_gap_mm, gen.contact_z_gap_layers * gen.layer_height_mm)
     z_off = 0.5 * contact_params.bead_diameter_mm + gap + 0.5 * det_h
     collision = SliceCollision(det_slices, heights, gen.xy_clearance_mm)
@@ -234,6 +241,19 @@ def _generate_tree_support(
                       "못했습니다. 구슬 크기와 여유를 확인하세요.", stacklevel=2)
         return SupportResult(trimesh.Trimesh(), None, det_slices)
 
+    # 접점 간격을 넓게 잡을수록(구슬 수를 줄이려고) 접점 하나가 대표하는
+    # 대표 높이 하나로는 그 접점이 실제로 내려앉은 XY 위치의 진짜 천장
+    # 높이를 못 맞힐 때가 있다. 그러면 가지 끝이 실제 표면보다 한참 아래서
+    # 멈춰 눈에 띄는 틈이 남는다. 여기서 각 리프 위로 실제 표면을 다시
+    # 광선으로 찾아, 모자란 만큼만 구슬을 더 쌓아 잇는다.
+    from .printability import close_ceiling_gaps
+    report_progress("천장 틈 보정")
+    ceiling_targets = [(n.x, n.y, n.z + z_off) for n in skeleton.nodes if n.kind == "contact"]
+    seeds, ceiling_filled = close_ceiling_gaps(
+        seeds, mesh, ceiling_targets, body_params.bead_diameter_mm,
+        gen.xy_clearance_mm, embed=embed, max_beads=limit,
+    )
+
     # 구슬 좌표를 BeadPlan 형태로 담아 기존 meshing/검증 코드를 재사용한다.
     plan = BeadPlan()
     # 접점을 없애서 개수만 줄인 결과를 성공으로 오인하지 않도록 기록한다.
@@ -245,7 +265,8 @@ def _generate_tree_support(
         supported = int((distances <= contact_params.bead_diameter_mm * 0.6).sum())
     plan.tree_stats = dict(requested_contacts=len(contacts), supported_contacts=supported,
                            roots=len(skeleton.roots()), contact_spacing_mm=spacing,
-                           repaired_beads=repaired, removed_unsupported_beads=unsupported)
+                           repaired_beads=repaired, removed_unsupported_beads=unsupported,
+                           ceiling_gap_beads=ceiling_filled)
     if supported < len(contacts):
         warnings.warn(f"선택한 접점 {len(contacts)}개 중 {len(contacts) - supported}개는 "
                       "최종 비드에 연결되지 않았습니다. 지지 누락을 확인하세요.", stacklevel=2)
