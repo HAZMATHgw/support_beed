@@ -65,6 +65,12 @@ def geometry_spies(monkeypatch):
 @pytest.mark.parametrize("tree", [False, True], ids=["grid", "tree"])
 def test_candidates_share_one_geometry_pass(tuning_inputs, geometry_spies, steps, tree):
     model, gen, contact = tuning_inputs
+    # 트리 상한은 오버행의 평균 '높이'에서 정해진다. 이 모델은 3mm 밖에
+    # 안 되는 얇은 상자라 기본 비율(0.1)로는 상한이 인쇄 가능 최소보다도
+    # 작아져 후보가 하나로 뭉개진다. 여기서 검증하려는 건 비율 자체가
+    # 아니라 "형상 탐지를 한 번만 공유하는지"이므로, 비율을 넉넉히 올려
+    # steps 개만큼 실제로 퍼진 후보가 나오게 한다.
+    gen = replace(gen, auto_tree_height_ratio=10.0) if tree else gen
     result = autotune.auto_tune_bead_diameter(model, replace(gen, tree_enabled=tree),
                                              contact, steps=steps)
     assert len(result.candidates) == steps
@@ -82,10 +88,13 @@ def test_candidates_share_one_geometry_pass(tuning_inputs, geometry_spies, steps
 @pytest.mark.parametrize("tree", [False, True], ids=["grid", "tree"])
 def test_equal_minimum_and_maximum_diameters_are_scored_once(tuning_inputs, geometry_spies, tree):
     model, gen, contact = tuning_inputs
-    gen = replace(gen, tree_enabled=tree, min_bead_diameter_mm=0.2)
+    # 구슬 상한은 이제 빈 공간(오버행 단면) 크기에서 정해지므로, 최소치와
+    # 확실히 같아지게 하려면 인쇄 가능 최소를 그 상한보다 훨씬 크게 준다.
+    # max(min_bead, void_based) 는 그러면 항상 min_bead 로 고정된다.
+    gen = replace(gen, tree_enabled=tree, min_bead_diameter_mm=5.0)
     result = autotune.auto_tune_bead_diameter(model, gen, contact, steps=20)
-    assert [candidate.bead_diameter_mm for candidate in result.candidates] == [0.2]
-    assert result.chosen.bead_diameter_mm == 0.2
+    assert [candidate.bead_diameter_mm for candidate in result.candidates] == [5.0]
+    assert result.chosen.bead_diameter_mm == 5.0
     assert geometry_spies["slice"].call_count == 1
     assert geometry_spies["score"].call_count == 1
 
@@ -152,14 +161,21 @@ def test_detection_height_respects_the_maximum_layer_count(tuning_inputs, geomet
 
 def test_tree_target_cannot_be_met_by_a_nonexistent_filler_bonus(tuning_inputs, geometry_spies):
     model, gen, contact = tuning_inputs
-    gen = replace(gen, tree_enabled=True)
+    # 이 모델은 3mm 밖에 안 되는 얇은 상자라, 기본 높이 비율(0.1)로는 상한이
+    # 인쇄 가능 최소로 무너져 largest 가 사실상 아무것도 침식하지 않는다.
+    # 비율을 올려 largest 가 1.46mm 사각형을 실제로 좁힐 만큼 커지게 한다.
+    gen = replace(gen, tree_enabled=True, auto_tree_height_ratio=3.0)
     geometry_spies["detect"].side_effect = lambda *args, **kwargs: [
         Polygon(), box(0, 0, 1.46, 1.46), Polygon()
     ]
     probe = autotune.auto_tune_bead_diameter(model, gen, contact, target_fill=0.0, steps=2)
     largest = max(probe.candidates, key=lambda candidate: candidate.bead_diameter_mm)
     smaller = min(probe.candidates, key=lambda candidate: candidate.bead_diameter_mm)
-    assert largest.fillable_fraction == pytest.approx(((1.46 - 0.2) / 1.46) ** 2)
+    # 구슬 상한이 이제 빈 공간(여기서는 1.46x1.46 오버행 사각형) 크기에서
+    # 정해지므로 0.2mm 로 고정되어 있지 않다. largest 가 실제로 고른 지름을
+    # 그대로 침식 공식에 대입해 같은 기하 계산이 여전히 맞는지 확인한다.
+    assert largest.fillable_fraction == pytest.approx(
+        ((1.46 - largest.bead_diameter_mm) / 1.46) ** 2)
     assert largest.fillable_fraction < 0.75
     assert smaller.estimated_beads > largest.estimated_beads
 

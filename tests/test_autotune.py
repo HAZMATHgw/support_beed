@@ -26,11 +26,23 @@ def _tune(model, nozzle, **kw):
     return auto_tune_bead_diameter(model, gen, contact, **kw)
 
 
-def test_chosen_bead_is_within_printable_range(model):
-    """고른 구슬은 인쇄 가능 최소보다 크고 노즐 절반보다 작아야 한다."""
+def test_chosen_bead_respects_the_printable_floor(model):
+    """고른 구슬은 인쇄 가능 최소보다 작아지면 안 된다."""
     nozzle = 5.0
     res = _tune(model, nozzle)
-    assert nozzle * 0.35 - 1e-9 <= res.chosen.bead_diameter_mm <= nozzle * 0.5 + 1e-9
+    assert res.chosen.bead_diameter_mm >= nozzle * 0.35 - 1e-9
+
+
+def test_auto_bead_ceiling_is_not_capped_by_the_nozzle(model):
+    """구슬 상한은 더 이상 '노즐 지름의 절반'에 묶이지 않는다.
+
+    오버행 단면이 넓은 모델(이 모델은 36x36 상판이 12x12 다리 위로 넓게
+    걸쳐 있다)에서는 노즐 절반보다 훨씬 큰 구슬도 후보로 올라와야, 굳이
+    잘게 채우지 않고도 구슬 수를 줄일 수 있다.
+    """
+    nozzle = 5.0
+    res = _tune(model, nozzle)
+    assert max(c.bead_diameter_mm for c in res.candidates) > nozzle * 0.5
 
 
 def test_picks_largest_bead_that_meets_the_target(model):
@@ -71,9 +83,12 @@ def test_max_beads_limit_is_respected(model):
 def test_impossible_bead_limit_picks_the_fewest_beads(model):
     """상한을 만족하는 후보가 하나도 없으면 개수가 가장 적은 것을 고른다.
 
-    품질만 좇아 더 작은 구슬을 고르면 개수가 오히려 더 늘어난다.
+    품질만 좇아 더 작은 구슬을 고르면 개수가 오히려 더 늘어난다. 구슬 상한이
+    더 이상 노즐에 묶이지 않으므로, 빈 공간이 넓은 모델에서는 큰 구슬 하나로
+    작은 max_beads 도 만족할 수 있다 — 그래서 여기서는 어떤 구슬로도 절대
+    만족할 수 없는 음수 상한을 준다.
     """
-    res = _tune(model, 1.0, target_fill=0.0, max_beads=1)
+    res = _tune(model, 1.0, target_fill=0.0, max_beads=-1)
     assert not res.met_target
     assert res.chosen.estimated_beads == min(
         c.estimated_beads for c in res.candidates)

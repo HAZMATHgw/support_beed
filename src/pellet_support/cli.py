@@ -51,7 +51,21 @@ def build_parser() -> argparse.ArgumentParser:
                    help="모델과 노즐에 맞는 구슬 크기를 자동으로 고른다. "
                         "--bead-diameter 를 직접 주면 그 값이 우선한다")
     g.add_argument("--auto-target", type=float, default=0.75,
-                   help="--auto 의 목표 품질(서포터 영역 중 구슬이 들어갈 수 있는 비율)")
+                   help="--auto 의 목표 품질(서포터 영역 중 구슬이 들어갈 수 있는 "
+                        "비율). 낮추면 얇고 좁은 오버행 구간이 통째로 '자리 없음' "
+                        "으로 빠져 그 부분에 구슬이 하나도 안 놓일 수 있다 — "
+                        "구슬을 더 키우고 싶으면 이 값보다 auto-tree-height-ratio "
+                        "/ auto-void-ratio 를 올리는 쪽을 먼저 시도하세요")
+    g.add_argument("--auto-void-ratio", type=float, default=0.35,
+                   help="--auto --no-tree(격자 모드) 가 구슬 지름 상한을 정할 때 "
+                        "쓰는 비율. 노즐 지름이 아니라 실제 오버행(빈 공간) 단면의 "
+                        "평균 지름에 이 비율을 곱해 상한으로 쓴다")
+    g.add_argument("--auto-tree-height-ratio", type=float, default=0.1,
+                   help="--auto 트리 모드(기본)가 구슬 지름 상한을 정할 때 쓰는 "
+                        "비율. 트리는 접점에서 베드까지 기둥을 세우므로, 오버행 "
+                        "단면의 폭이 아니라 베드까지의 (면적 가중) 평균 높이에 이 "
+                        "비율을 곱해 상한으로 쓴다. 배 선체처럼 단면은 얇아도 "
+                        "높이가 큰 모델에서 구슬을 더 키워 개수를 줄이려면 올리세요")
     g.add_argument("--min-bead-ratio", type=float, default=None,
                    help="인쇄 가능한 최소 구슬 지름 / 노즐 지름 (기본 0.35). "
                         "압출기가 더 작은 방울을 안정적으로 뽑을 수 있으면 낮추세요")
@@ -238,6 +252,8 @@ def _run(argv=None) -> int:
         fallback_solid=not args.no_fallback_solid,
         max_layers=args.max_layers,
         max_beads=args.max_beads,
+        auto_void_bead_ratio=args.auto_void_ratio,
+        auto_tree_height_ratio=args.auto_tree_height_ratio,
     )
 
     print(f"[1/4] 모델 로드: {args.input}")

@@ -36,7 +36,6 @@ from .slicing import clean, slice_model
 from .validation import (fillable_fraction, validate_bead_params,
                          validate_gen_params, validate_mesh)
 
-
 @dataclass
 class TuningCandidate:
     bead_diameter_mm: float
@@ -102,14 +101,8 @@ def auto_tune_bead_diameter(
     report = progress_callback or (lambda stage: None)
     nozzle = gen.nozzle_diameter_mm
     min_bead = gen.min_bead_diameter_mm or (nozzle * gen.min_bead_to_nozzle_ratio)
-    max_bead = max(min_bead, nozzle * 0.5)
     if steps < 2:
         steps = 2
-
-    # 큰 것부터 작은 것까지 균등하게 후보를 만든다.
-    diameters = list(dict.fromkeys(
-        max_bead - (max_bead - min_bead) * i / (steps - 1) for i in range(steps)
-    ))
 
     # 형상 탐지는 후보 지름과 분리한다. 예전에는 후보마다 전체 메시를
     # 다시 자르고 아래층까지 영역을 확장해, 작은 노즐에서 수 분씩 걸렸다.
@@ -122,18 +115,48 @@ def auto_tune_bead_diameter(
     if gen.tree_enabled:
         # 트리는 오버행 접점을 가지로 잇는다. 격자처럼 전체 지지 부피를
         # 만들 필요가 없으며, 그 부피로 개수를 추정하면 크게 부풀려진다.
-        analysis_gen = replace(gen, removal_opening_mm=max_bead)
+        # 구슬 상한을 아직 모르는 상태이므로, 여기서는 인쇄 가능한 최소
+        # 구슬(min_bead)을 통로 폭으로 가정해 빈 공간을 최대한 보수적으로
+        # (=넓게) 잡는다. 최종 생성 단계에서는 실제로 고른 구슬 지름으로
+        # 다시 계산하므로 이 근사는 크기 선택에만 영향을 준다.
+        analysis_gen = replace(gen, removal_opening_mm=min_bead)
         support = detect_overhangs(det_slices, analysis_gen, det_h)
     else:
         support, _ = build_support_regions(det_slices, gen, det_h)
     regions = [clean(s) for s in support]
-    total_area = sum(r.area for r in regions if not r.is_empty)
+    nonempty_regions = [r for r in regions if not r.is_empty]
+    total_area = sum(r.area for r in nonempty_regions)
     # 트리 개수는 병합/몸통 보강 전 수직 가지 길이의 근사치다.
     # 실제 배치 개수나 최종 연결 품질의 보증으로 쓰지는 않는다.
     height_weighted_area = sum(
         r.area * (i + 0.5) * det_h for i, r in enumerate(regions)
         if not r.is_empty
     )
+
+    # 구슬 지름 상한을 노즐이 아니라, 실제로 채워야 할 '빈 공간'의 크기에서
+    # 정한다. 노즐 지름의 절반으로 무조건 누르면, 빈 공간이 넓은 모델(예:
+    # 배 선체)에서도 구슬을 키우지 못해 구슬 수가 불필요하게 늘어난다.
+    #
+    # 트리와 격자는 '빈 공간'의 의미가 다르다. 트리는 접점에서 베드까지
+    # 내려가는 기둥을 세우므로, 기둥이 채워야 할 빈 공간의 크기는 오버행
+    # 단면의 폭이 아니라 베드까지의 높이다 — 배 선체처럼 단면은 얇고 긴
+    # 고리 모양이어도 높이가 크면 구슬을 그만큼 많이 쌓아야 한다. 격자는
+    # 반대로 매 층을 통째로 채우므로 단면 폭이 곧 빈 공간의 크기다.
+    if gen.tree_enabled:
+        avg_height = height_weighted_area / total_area if total_area > 0 else 0.0
+        max_bead = max(min_bead, avg_height * gen.auto_tree_height_ratio)
+    else:
+        if nonempty_regions:
+            avg_area = total_area / len(nonempty_regions)
+            void_diameter = 2.0 * math.sqrt(avg_area / math.pi)
+        else:
+            void_diameter = 0.0
+        max_bead = max(min_bead, void_diameter * gen.auto_void_bead_ratio)
+
+    # 큰 것부터 작은 것까지 균등하게 후보를 만든다.
+    diameters = list(dict.fromkeys(
+        max_bead - (max_bead - min_bead) * i / (steps - 1) for i in range(steps)
+    ))
 
     candidates: List[TuningCandidate] = []
     for index, d in enumerate(diameters, 1):
