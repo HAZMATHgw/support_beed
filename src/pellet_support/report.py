@@ -40,6 +40,17 @@ def load_mesh(path: str) -> trimesh.Trimesh:
         obj = trimesh.util.concatenate(list(obj.dump()))
     if not isinstance(obj, trimesh.Trimesh) or obj.is_empty:
         raise RuntimeError(f"메쉬를 읽지 못했습니다: {path}")
+
+    # 외부 도구(특히 삼각형을 대폭 줄이는 단순화기)가 저장한 메쉬는 원래
+    # 같은 점이어야 할 정점들을 부동소수점 오차만큼만 떨어뜨려 놓곤 한다.
+    # trimesh 의 기본 병합 허용치는 이걸 못 잡을 만큼 촘촘해서, 얇은 가지
+    # 하나가 수만 개의 먼지 조각으로 쪼개진 채로 남는다 — 그러면 오버행
+    # 탐지·광선 검사가 실제로는 이어진 자리에서 가짜 틈을 본다. 이 프로젝트가
+    # 다루는 크기(수 mm 단위 구슬)에서 0.001mm 이내는 확실히 같은 점이므로,
+    # 안전하게 한 번 더 병합한다.
+    obj.merge_vertices(digits_vertex=3)
+    obj.update_faces(obj.nondegenerate_faces())
+    obj.update_faces(obj.unique_faces())
     return obj
 
 
