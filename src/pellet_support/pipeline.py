@@ -137,6 +137,7 @@ def _generate_tree_support(
     from .skeleton import (
         add_bracing, assign_hierarchical_radii, extract_contact_points,
         grow_branches, prune_floating, settle_collisions, skeleton_to_bead_seeds,
+        smooth_branches,
     )
     from .tree_collision import SliceCollision
 
@@ -188,6 +189,12 @@ def _generate_tree_support(
         contact_z_offset=z_off,
         bead_radius=0.5 * max(contact_params.bead_diameter_mm, body_params.bead_diameter_mm),
     )
+    # 매 성장 단계가 그 순간의 끌림 대상 쪽으로만 꺾이다 보니 트렁크가
+    # 지그재그로 남는다. 위상은 그대로 두고 통과 마디만 부모/자식 중점
+    # 쪽으로 완화해서, 잘 알려진 트리 서포터처럼 더 매끈하고 짧은 경로로
+    # 다듬는다(충돌 여유를 다시 확인하면서).
+    report_progress("가지 경로 다듬기")
+    smooth_branches(skeleton, det_slices, heights, gen.xy_clearance_mm)
     if verbose:
         print(f"      골격: {skeleton.summary()}, 루트 {len(skeleton.roots())}개")
     skipped = skeleton.skipped_contacts + skeleton.blocked_contacts
@@ -246,27 +253,52 @@ def _generate_tree_support(
     # 높이를 못 맞힐 때가 있다. 그러면 가지 끝이 실제 표면보다 한참 아래서
     # 멈춰 눈에 띄는 틈이 남는다. 여기서 각 리프 위로 실제 표면을 다시
     # 광선으로 찾아, 모자란 만큼만 구슬을 더 쌓아 잇는다.
-    from .printability import close_ceiling_gaps
+    from .printability import close_ceiling_gaps, dedupe_seeds, prune_disconnected_fill
     report_progress("천장 틈 보정")
-    ceiling_targets = [(n.x, n.y, n.z + z_off) for n in skeleton.nodes if n.kind == "contact"]
-    seeds, ceiling_filled = close_ceiling_gaps(
+    contact_nodes = [n for n in skeleton.nodes if n.kind == "contact"]
+    ceiling_targets = [(n.x, n.y, n.z + z_off) for n in contact_nodes]
+    seeds, ceiling_filled, resolved_tops = close_ceiling_gaps(
         seeds, mesh, ceiling_targets, body_params.bead_diameter_mm,
         gen.xy_clearance_mm, embed=embed, max_beads=limit,
     )
+    tip_nodes = [(n.x, n.y, resolved if resolved is not None else n.z)
+                for n, resolved in zip(contact_nodes, resolved_tops)]
+
+    # 여러 단계(트렁크 최밀충전, 가새, 아래 받침 보완, 천장 틈 보정)가 서로
+    # 무엇을 이미 놓았는지 모르고 각자 구슬을 놓다 보니, 같은 자리에 겹쳐
+    # 놓이거나(울퉁불퉁해 보임), 가는 가지가 급하게 꺾이는 자리에서 최밀충전
+    # 층이 서로 안 이어져 몇 개짜리 조각이 떨어져 나가기도 한다. 인쇄는
+    # 가능하지만(모델이나 이웃에 얹혀 있음) 아무 오버행도 떠받치지 않는
+    # 자투리라, 여기서 정리한다.
+    report_progress("구슬 정리")
+    seeds, deduped = dedupe_seeds(seeds)
+    seeds, pruned_fill = prune_disconnected_fill(seeds, tip_nodes, z0)
+    # close_ceiling_gaps 는 접점 바로 아래 하나만 확인하고 붙이므로, 애초에
+    # grow_branches 에서 그 접점까지 가지가 아예 안 만들어졌을 때는(막힌
+    # 접점) 근처의 엉뚱한 비드 옆에 보정 비드를 놓고 만다 — 그 결과가
+    # 베드에도 모델에도 안 이어진 진짜 허공의 비드일 수 있다. 마지막으로
+    # 한 번 더 확인해 그런 경우만 걸러낸다.
+    seeds, floating_after_cleanup = prune_floating(
+        seeds, None if gen.support_on_build_plate_only else mesh, z0, gen.xy_clearance_mm)
+    unsupported += floating_after_cleanup
 
     # 구슬 좌표를 BeadPlan 형태로 담아 기존 meshing/검증 코드를 재사용한다.
     plan = BeadPlan()
     # 접점을 없애서 개수만 줄인 결과를 성공으로 오인하지 않도록 기록한다.
+    # close_ceiling_gaps 가 보정한 접점은 원래 골격 좌표보다 훨씬 위(실제
+    # 표면)로 옮겨질 수 있으므로, 연결 여부는 보정된 목표 높이를 기준으로
+    # 확인한다 — 안 그러면 정상적으로 고쳐진 큰 보정을 '연결 안 됨'으로
+    # 오인한다.
     from scipy.spatial import cKDTree
-    tip_nodes = [(n.x, n.y, n.z) for n in skeleton.nodes if n.kind == "contact"]
     supported = 0
-    if tip_nodes:
+    if tip_nodes and seeds:
         distances, _ = cKDTree([seed[:3] for seed in seeds]).query(tip_nodes)
         supported = int((distances <= contact_params.bead_diameter_mm * 0.6).sum())
     plan.tree_stats = dict(requested_contacts=len(contacts), supported_contacts=supported,
                            roots=len(skeleton.roots()), contact_spacing_mm=spacing,
                            repaired_beads=repaired, removed_unsupported_beads=unsupported,
-                           ceiling_gap_beads=ceiling_filled)
+                           ceiling_gap_beads=ceiling_filled, deduped_beads=deduped,
+                           pruned_fill_beads=pruned_fill)
     if supported < len(contacts):
         warnings.warn(f"선택한 접점 {len(contacts)}개 중 {len(contacts) - supported}개는 "
                       "최종 비드에 연결되지 않았습니다. 지지 누락을 확인하세요.", stacklevel=2)

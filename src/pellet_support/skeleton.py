@@ -609,6 +609,61 @@ def grow_branches(
     return skeleton
 
 
+def smooth_branches(
+    skeleton: SupportSkeleton,
+    model_slices: Sequence,
+    heights: Sequence[float],
+    xy_clearance: float,
+    iterations: int = 4,
+    relax: float = 0.5,
+) -> SupportSkeleton:
+    """가지 경로의 지그재그를 풀어 매끈하고 짧은 곡선에 가깝게 만든다.
+
+    ``grow_branches`` 는 한 단계(``step_h``)마다 그 순간의 끌림 대상 쪽으로
+    기운 한도만큼만 움직인다. 위상(어디서 병합하고 어디로 내려가는지)은
+    이걸로 충분하지만, 매 단계 다른 방향으로 꺾이다 보니 경로 자체는
+    들쭉날쭉하다. 잘 알려진 트리 서포터 구현(Cura/PrusaSlicer 계열)은
+    이런 병합 이후에 경로를 매끈하고 더 짧게 다듬는다 — 위상은 그대로 두고
+    각 마디를 부모/자식의 중점 쪽으로 완화해서 같은 효과를 낸다.
+
+    병합점(자식이 2개 이상)과 리프(접점), 뿌리(부모 없음), 모델 위에
+    내려앉은 지점은 그 자리 자체가 의미 있는 위치라 건드리지 않는다.
+    자식이 정확히 하나뿐인 '통과' 마디만, 매번 옮긴 자리가 부모/자식
+    양쪽 구간에서 여전히 충돌 없는 경우에만 옮긴다.
+    """
+    if not skeleton.nodes:
+        return skeleton
+    from .tree_collision import SliceCollision
+
+    collision = SliceCollision(model_slices, heights, xy_clearance)
+    for _ in range(max(0, iterations)):
+        moved = 0
+        for idx, node in enumerate(skeleton.nodes):
+            if node.kind != "trunk" or node.on_bed or node.on_model:
+                continue
+            if node.parent is None or len(skeleton.children[idx]) != 1:
+                continue
+            parent = skeleton.nodes[node.parent]
+            child = skeleton.nodes[skeleton.children[idx][0]]
+            target_x = 0.5 * (parent.x + child.x)
+            target_y = 0.5 * (parent.y + child.y)
+            nx = node.x + relax * (target_x - node.x)
+            ny = node.y + relax * (target_y - node.y)
+            if abs(nx - node.x) < 1e-9 and abs(ny - node.y) < 1e-9:
+                continue
+            if not collision.edge_clear((parent.x, parent.y, parent.z), (nx, ny, node.z),
+                                        parent.radius, node.radius):
+                continue
+            if not collision.edge_clear((nx, ny, node.z), (child.x, child.y, child.z),
+                                        node.radius, child.radius):
+                continue
+            node.x, node.y = nx, ny
+            moved += 1
+        if moved == 0:
+            break
+    return skeleton
+
+
 def _bead_layer_offsets(radius: float, pitch: float, odd: bool,
                         shell: Optional[float] = None):
     """축을 중심으로 반경 ``radius`` 원 안에 들어가는 육각 최밀 격자 오프셋.

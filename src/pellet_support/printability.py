@@ -282,17 +282,29 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
     a real, if shallow, joint instead of a gap with nothing to bridge. This
     also closes the small by-design clearance every contact is placed with
     (not just the occasional large miss): when the shortfall fits within one
-    bead's reach, the existing top bead is lifted in place rather than
-    stacking a near-duplicate on top of it; a chain of new beads is only
-    inserted when the gap is too tall for a single bead to bridge.
+    bead's reach *and* lifting the existing top bead would not pull it out
+    of reach of whatever it was already resting on, that bead is moved in
+    place rather than stacking a near-duplicate on top of it. Otherwise
+    (including when a "safe" lift would strand the bead beneath it) a chain
+    of new beads is inserted above the original, unmoved top bead instead,
+    so the connection that was already there never breaks.
 
     ``targets`` is a sequence of ``(x, y, expected_z)`` — the contact's
     original (pre-offset) overhang height, used only to aim the search; the
     real surface is found with a ray cast directly above the branch's own
     landing point, not the target's nominal XY.
+
+    Returns ``(seeds, corrections, resolved_z)``. ``resolved_z`` has one
+    entry per target: the z of the bead now sitting at (or past) that
+    contact's true, embedded surface, or ``None`` where no correction could
+    be made (no nearby bead, no ray hit, budget exhausted, ...). Callers that
+    check "does every contact have a connected bead" must compare against
+    this corrected height instead of the contact's original, pre-correction
+    height — a large but legitimate correction (the whole reason this
+    function exists) would otherwise look identical to a real disconnection.
     """
     if not len(seeds) or not len(targets) or mesh is None:
-        return list(seeds), 0
+        return list(seeds), 0, [None] * len(targets)
     beads = np.asarray(seeds, dtype=float)
     tree = cKDTree(beads[:, :2])
     radius = 0.5 * bead_diameter
@@ -301,6 +313,7 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
     pq = mesh.nearest
     added = []
     moved = {}
+    resolved: list = [None] * len(targets)
     point_safety = {}
 
     def check_points(points):
@@ -320,12 +333,26 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
             point_safety.update(zip(missing, check_points(np.asarray(missing))))
         return all(point_safety[key] for key in keys)
 
-    for x, y, expected_z in targets:
+    for t_idx, (x, y, expected_z) in enumerate(targets):
         nearby = tree.query_ball_point([x, y], bead_diameter * 2.0)
         if not nearby:
             continue
-        top_idx = max(nearby, key=lambda j: beads[j, 2])
+        # A tall, densely routed model can put an unrelated branch's bead at
+        # a similar XY but a wildly different Z (e.g. one lattice column
+        # passing near another's base). Restrict to beads actually near this
+        # contact's own expected height before taking "the top one", or a
+        # distant branch gets mistaken for this contact's tip and the real
+        # gap here never gets corrected.
+        near_height = [j for j in nearby if beads[j, 2] <= expected_z + bead_diameter]
+        if not near_height:
+            continue
+        top_idx = max(near_height, key=lambda j: beads[j, 2])
         top = beads[top_idx, :3]
+        # The bead this branch already rests on, if any — lifting ``top``
+        # must not pull it out of reach of this one, or the chain breaks
+        # exactly where it used to be connected.
+        below = [j for j in near_height if j != top_idx]
+        below_idx = max(below, key=lambda j: beads[j, 2]) if below else None
         # A ray from the branch's own landing XY finds the surface it is
         # actually closest to, which is what matters for the print gap.
         locations, _, faces = mesh.ray.intersects_location(
@@ -349,14 +376,21 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         target_centre_z = target_top - radius
         gap = target_centre_z - top[2]
         if gap <= 1e-9:
+            resolved[t_idx] = float(top[2])
             continue
-        if gap <= step:
+        safe_to_move = True
+        if gap <= step and below_idx is not None:
+            new_top = np.array([top[0], top[1], target_centre_z])
+            required = 0.98 * (radius + 0.5 * float(beads[below_idx, 3]))
+            safe_to_move = np.linalg.norm(new_top - beads[below_idx, :3]) <= required
+        if gap <= step and safe_to_move:
             # The base placement left only the usual by-design clearance
             # short of the surface. Lift that same bead into a shallow
             # embed rather than stacking a near-duplicate bead a fraction
             # of a millimetre above it.
             beads[top_idx, 2] = target_centre_z
             moved[top_idx] = target_centre_z
+            resolved[t_idx] = target_centre_z
             continue
         count = max(1, int(math.ceil(gap / step)))
         if len(seeds) + len(added) + count > budget:
@@ -371,6 +405,90 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
             continue
         added.extend(path)
         added.extend(final)
+        resolved[t_idx] = final[0][2]
     result = [(x, y, moved[i], d) if i in moved else (x, y, z, d)
               for i, (x, y, z, d) in enumerate(seeds)]
-    return result + added, len(added) + len(moved)
+    return result + added, len(added) + len(moved), resolved
+
+
+def dedupe_seeds(seeds, tolerance=0.02):
+    """Merge beads whose centres coincide within ``tolerance`` mm.
+
+    Independent passes (trunk hex-fill, bracing, repair, ceiling-gap
+    correction) can each place a bead near the same spot without checking
+    what the others already put there. Two beads on top of each other add no
+    strength and read as a lumpy, uneven clump — keep the first and drop the
+    rest.
+
+    A looser, overlap-ratio-based version of this (dropping any pair deeper
+    than some fraction of a diameter, not just near-exact coincidence) was
+    tried and reverted: bracing and repair deliberately press a new bead
+    deep into an existing one to guarantee a firm joint between two trunks
+    that would otherwise stand separately, and that check could not tell a
+    redundant clump from an intentional deep joint — it silently deleted the
+    very beads ``test_bracing_ties_separate_trunks_together`` and the
+    point-four-mm connectivity tests exist to require. Only exact
+    coincidence is safe to remove generically.
+    """
+    if not seeds:
+        return list(seeds), 0
+    beads = np.asarray(seeds, dtype=float)
+    tree = cKDTree(beads[:, :3])
+    pairs = tree.query_pairs(tolerance, output_type="ndarray")
+    if not len(pairs):
+        return list(seeds), 0
+    drop = np.zeros(len(beads), dtype=bool)
+    for a, b in pairs:
+        if not drop[a]:
+            drop[int(b)] = True
+    kept = [s for s, d in zip(seeds, drop) if not d]
+    return kept, int(drop.sum())
+
+
+def prune_disconnected_fill(seeds, contact_points, bed_z, max_cluster_size=8,
+                            touch_slack=0.02):
+    """Drop small bead clusters that neither reach the bed nor hold up a contact.
+
+    A trunk's hex-packed fill assumes each layer's disk lines up with its
+    neighbours; a sharp bend on a thin, twisty branch can strand a handful of
+    beads that end up spatially isolated from the rest of their own trunk.
+    Each stray bead is individually printable (it can rest against the model
+    or a neighbour), so the existing bed/model-anchor check does not remove
+    it, but the cluster does not reach the bed and is not the reason any
+    overhang is held up -- it is leftover clutter, not support. Only clusters
+    at most ``max_cluster_size`` beads are considered, so a genuine large
+    branch that legitimately lands away from a sampled contact is never
+    touched.
+    """
+    if not seeds:
+        return list(seeds), 0
+    beads = np.asarray(seeds, dtype=float)
+    radii = beads[:, 3] * 0.5
+    tree = cKDTree(beads[:, :3])
+    pairs = tree.query_pairs(float(radii.max()) * 2.0, output_type="ndarray")
+    n = len(beads)
+    if len(pairs):
+        delta = beads[pairs[:, 1], :3] - beads[pairs[:, 0], :3]
+        dist = np.linalg.norm(delta, axis=1)
+        touching = dist <= (1.0 + touch_slack) * (radii[pairs[:, 0]] + radii[pairs[:, 1]])
+        pairs = pairs[touching]
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+    graph = csr_matrix((np.ones(len(pairs), dtype=bool), (pairs[:, 0], pairs[:, 1])),
+                       shape=(n, n)) if len(pairs) else csr_matrix((n, n), dtype=bool)
+    _, labels = connected_components(graph, directed=False)
+    bed_tolerance = np.maximum(1e-6, 0.25 * radii)
+    on_bed = (beads[:, 2] - radii) <= bed_z + bed_tolerance
+    contacts = np.asarray(contact_points, dtype=float) if len(contact_points) else None
+    contact_tree = cKDTree(contacts) if contacts is not None and len(contacts) else None
+    keep = np.ones(n, dtype=bool)
+    for label in np.unique(labels):
+        members = np.flatnonzero(labels == label)
+        if len(members) > max_cluster_size or on_bed[members].any():
+            continue
+        if contact_tree is not None:
+            near, _ = contact_tree.query(beads[members, :3])
+            if (near <= radii[members] * 1.5).any():
+                continue
+        keep[members] = False
+    return [s for s, k in zip(seeds, keep) if k], int((~keep).sum())
