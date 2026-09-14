@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -143,6 +144,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="0=20면, 1=80면, 2=320면")
     o.add_argument("--with-model", action="store_true",
                    help="모델+서포터 합본도 저장")
+    o.add_argument("--with-model-max-faces", type=int, default=40000,
+                   help="합본 파일에 넣는 모델 사본의 삼각형 수 상한(기본 4만). "
+                        "합본은 슬라이서에서 정렬 확인용일 뿐 실제 출력엔 "
+                        "원본 모델 파일을 그대로 쓰므로, 원본이 이보다 크면 "
+                        "합본에서만 단순화해 파일 크기를 줄인다. 0이면 끔"
+                        "(원본 그대로 넣음 — 큰 모델은 합본이 매우 커진다).")
     o.add_argument("--dump-json", action="store_true",
                    help="bead 좌표를 JSON 으로도 저장")
     o.add_argument("--preview", type=int, default=None, metavar="LAYER",
@@ -326,8 +333,25 @@ def _run(argv=None) -> int:
     print(f"[4/4] 저장: {out}")
 
     if args.with_model:
+        model_copy = mesh
+        cap = args.with_model_max_faces
+        if cap and len(mesh.faces) > cap:
+            # 합본은 슬라이서·뷰어에서 정렬을 확인하는 용도일 뿐 — 실제 출력은
+            # 원본 모델 파일을 그대로 쓴다(README "결과물 활용" 참고). 원본
+            # 해상도를 합본에도 그대로 넣으면 서포터보다 모델 쪽 삼각형이
+            # 수십~수백 배 많아 파일만 커지고 아무 이득이 없다.
+            try:
+                model_copy = mesh.simplify_quadric_decimation(face_count=cap)
+            except Exception:
+                warnings.warn(
+                    f"모델이 커서(삼각형 {len(mesh.faces):,}개) 합본 파일용 "
+                    f"단순화를 건너뜁니다. 단순화에 필요한 fast_simplification "
+                    f"패키지가 없는 것으로 보입니다(pip install fast_simplification). "
+                    f"합본에 원본 해상도 그대로 들어가 파일이 커집니다.",
+                    stacklevel=2,
+                )
         scene = trimesh.Scene()
-        scene.add_geometry(mesh, node_name="model")
+        scene.add_geometry(model_copy, node_name="model")
         scene.add_geometry(result.mesh, node_name="support")
         # -o 로 출력 위치를 지정했으면 합본 파일도 그 위치를 따라야 한다.
         # 예전에는 -o 와 무관하게 항상 '입력 파일' 옆에 만들어서, -o 로
