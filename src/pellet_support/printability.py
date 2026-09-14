@@ -290,14 +290,17 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
     so the connection that was already there never breaks.
 
     ``targets`` is a sequence of ``(x, y, expected_z)`` — the contact's
-    original (pre-offset) overhang height, used only to aim the search; the
-    real surface is found with a ray cast directly above the branch's own
-    landing point, not the target's nominal XY.
+    original (pre-offset) overhang height, used only as a sanity check on
+    the search; the real surface is found as the closest point on the mesh
+    to the branch's own topmost bead, in whatever direction that is — not
+    necessarily straight up, since a twisty branch need not lean the same
+    way as its own ceiling.
 
     Returns ``(seeds, corrections, resolved_z)``. ``resolved_z`` has one
     entry per target: the z of the bead now sitting at (or past) that
     contact's true, embedded surface, or ``None`` where no correction could
-    be made (no nearby bead, no ray hit, budget exhausted, ...). Callers that
+    be made (no nearby bead, no usable nearby surface, budget exhausted,
+    ...). Callers that
     check "does every contact have a connected bead" must compare against
     this corrected height instead of the contact's original, pre-correction
     height — a large but legitimate correction (the whole reason this
@@ -353,50 +356,53 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         # exactly where it used to be connected.
         below = [j for j in near_height if j != top_idx]
         below_idx = max(below, key=lambda j: beads[j, 2]) if below else None
-        # A ray from the branch's own landing XY finds the surface it is
-        # actually closest to, which is what matters for the print gap.
-        locations, _, faces = mesh.ray.intersects_location(
-            [[top[0], top[1], top[2]]], [[0.0, 0.0, 1.0]], multiple_hits=True)
-        if not len(locations):
+        # A twisty branch does not necessarily lean the same way its actual
+        # ceiling does, so the nearest overhang surface to a tip is often not
+        # straight above it — a purely vertical ray can sail past a ceiling
+        # that is off to one side and find nothing (or the wrong thing).
+        # ``on_surface`` finds the true closest point in any direction, which
+        # is what the printed gap actually depends on.
+        closest, distance, face_idx = pq.on_surface([top])
+        closest, distance, face_idx = closest[0], float(distance[0]), face_idx[0]
+        normal = mesh.face_normals[face_idx]
+        # Only a downward-facing surface is a ceiling this contact can hang
+        # from; the closest point on a side wall or something below is not
+        # what this correction is for. This does not need to match the 45
+        # degree overhang threshold that flagged the contact in the first
+        # place -- detection measures the angle from stacked cross-sections,
+        # not one triangle's own normal, so a genuinely overhanging spot can
+        # still land on a near-vertical triangle right at that threshold.
+        # Reject only surfaces that plainly face sideways or upward.
+        if normal[2] > -0.3:
             continue
-        # A ray travelling up enters the solid through the overhang's
-        # underside, so the surface we want has a downward-facing normal —
-        # not upward, which would be the top of something the ray exits.
-        normals = mesh.face_normals[faces]
-        downward = normals[:, 2] <= -math.sqrt(0.5) + 1e-9
-        candidates = locations[downward, 2]
-        if not len(candidates):
+        # The intended ceiling is close to the detection sample's original
+        # height; a much farther point is unrelated geometry entirely.
+        if abs(closest[2] - expected_z) > 3.0 * bead_diameter:
             continue
-        # The intended ceiling is the closest downward-facing hit to the
-        # detection sample; a much farther one is unrelated geometry.
-        surface_z = min(candidates, key=lambda z: abs(z - expected_z))
-        if abs(surface_z - expected_z) > 3.0 * bead_diameter:
-            continue
-        target_top = surface_z + embed
-        target_centre_z = target_top - radius
-        gap = target_centre_z - top[2]
+        gap = distance - radius + embed
         if gap <= 1e-9:
             resolved[t_idx] = float(top[2])
             continue
+        direction = (closest - top) / distance if distance > 1e-9 else np.array([0.0, 0.0, 1.0])
+        target = top + direction * gap
+        target_centre = tuple(float(v) for v in target)
         safe_to_move = True
         if gap <= step and below_idx is not None:
-            new_top = np.array([top[0], top[1], target_centre_z])
             required = 0.98 * (radius + 0.5 * float(beads[below_idx, 3]))
-            safe_to_move = np.linalg.norm(new_top - beads[below_idx, :3]) <= required
+            safe_to_move = np.linalg.norm(target - beads[below_idx, :3]) <= required
         if gap <= step and safe_to_move:
             # The base placement left only the usual by-design clearance
             # short of the surface. Lift that same bead into a shallow
             # embed rather than stacking a near-duplicate bead a fraction
             # of a millimetre above it.
-            beads[top_idx, 2] = target_centre_z
-            moved[top_idx] = target_centre_z
-            resolved[t_idx] = target_centre_z
+            beads[top_idx, :3] = target
+            moved[top_idx] = target_centre
+            resolved[t_idx] = target_centre[2]
             continue
         count = max(1, int(math.ceil(gap / step)))
         if len(seeds) + len(added) + count > budget:
             continue
-        path = [(float(top[0]), float(top[1]),
-                float(top[2] + gap * (i / count)), bead_diameter)
+        path = [(*map(float, top + direction * (gap * (i / count))), bead_diameter)
                 for i in range(1, count + 1)]
         # The last bead is meant to press into the surface by design, so
         # only the beads leading up to it are checked for stray collisions.
@@ -406,7 +412,7 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         added.extend(path)
         added.extend(final)
         resolved[t_idx] = final[0][2]
-    result = [(x, y, moved[i], d) if i in moved else (x, y, z, d)
+    result = [(*moved[i], d) if i in moved else (x, y, z, d)
               for i, (x, y, z, d) in enumerate(seeds)]
     return result + added, len(added) + len(moved), resolved
 

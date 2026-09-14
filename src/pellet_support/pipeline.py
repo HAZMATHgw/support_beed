@@ -256,7 +256,23 @@ def _generate_tree_support(
     from .printability import close_ceiling_gaps, dedupe_seeds, prune_disconnected_fill
     report_progress("천장 틈 보정")
     contact_nodes = [n for n in skeleton.nodes if n.kind == "contact"]
-    ceiling_targets = [(n.x, n.y, n.z + z_off) for n in contact_nodes]
+    # 보통은 n.z + z_off 가 원래 감지된 오버행 높이(cp.z)를 그대로 복원한다
+    # (grow_branches 가 cz = cp.z - z_off 로 놓았으므로). 하지만 접점이 갈 곳이
+    # 없어 베드에 바로 내려앉은 경우(on_bed=True인 contact 노드) n.z 는 원래
+    # 높이를 잃은 베드 높이라, n.z + z_off 는 실제 천장과 아무 관련이 없는
+    # 값이 된다 — 그러면 광선이 찾은 진짜 표면이 이 값과 3*지름 넘게
+    # 벌어져 있다고 보고 보정을 포기해, 베드에 붙은 외딴 구슬 하나만 남는다.
+    # 원래 감지된 접점(contacts)에서 같은 위치의 진짜 높이를 다시 찾아 쓴다.
+    from scipy.spatial import cKDTree as _CKDTree
+    contact_xy = _CKDTree([(c.x, c.y) for c in contacts])
+    ceiling_targets = []
+    for n in contact_nodes:
+        if n.on_bed:
+            _, near = contact_xy.query([n.x, n.y])
+            expected_z = contacts[near].z
+        else:
+            expected_z = n.z + z_off
+        ceiling_targets.append((n.x, n.y, expected_z))
     seeds, ceiling_filled, resolved_tops = close_ceiling_gaps(
         seeds, mesh, ceiling_targets, body_params.bead_diameter_mm,
         gen.xy_clearance_mm, embed=embed, max_beads=limit,

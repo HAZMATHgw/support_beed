@@ -506,11 +506,16 @@ def grow_branches(
                            "load": 1, "ztop": cp.z})
         if nz <= z_end + 1e-9:
             # 베드 높이보다 낮게 시작해야 하는 접촉점은 구슬이 들어갈 틈이 없다.
+            # 다만 원래 감지된 오버행 높이(cp.z) 자체가 베드보다 위에 있다면
+            # 실제로 뭔가 떠받쳐야 할 진짜 틈이 있다는 뜻이다 (예: 베드에서
+            # 0.6mm 위부터 시작하는 아주 얕은 오버행) — 표준 오프셋(z_off)이
+            # 그 틈보다 넓어서 계산상 베드 아래로 내려가 버릴 뿐이다. 이런
+            # 경우 일단 베드에 놓고, 뒤이은 천장 틈 보정 단계에서 실제 표면
+            # 높이에 맞춰 다시 끌어올린다.
             while ci < len(remaining):
                 cp = remaining[ci]
                 ci += 1
-                if cp.z - contact_z_offset > z_end - 0.5 * r_bead and \
-                        not field.blocked(cp.x, cp.y, z_end):
+                if cp.z > z_end + 1e-9 and not field.blocked(cp.x, cp.y, z_end):
                     node = skeleton.add_node(cp.x, cp.y, z_end, None, bed_radius,
                                              cp.layer, kind="contact")
                     skeleton.nodes[node].on_bed = True
