@@ -515,8 +515,34 @@ def grow_branches(
             while ci < len(remaining):
                 cp = remaining[ci]
                 ci += 1
-                if cp.z > z_end + 1e-9 and not field.blocked(cp.x, cp.y, z_end):
-                    node = skeleton.add_node(cp.x, cp.y, z_end, None, bed_radius,
+                px, py = None, None
+                if cp.z > z_end + 1e-9:
+                    if not field.blocked(cp.x, cp.y, z_end):
+                        px, py = cp.x, cp.y
+                    else:
+                        # The contact's own XY is blocked at bed level even
+                        # though its detected height (cp.z) is clear above a
+                        # real void -- this is the same "overhang sampled
+                        # right at a wall" situation the main growth loop
+                        # already escapes above by trying nearby XY spots
+                        # (see ``blocked_here`` there); a straight-down
+                        # column at the exact sample XY simply runs into an
+                        # unrelated part of the model on the way to the bed.
+                        # Try the same nearby-spot search here instead of
+                        # giving up outright.
+                        reach = r_bead + gen.xy_clearance_mm + 2.0 * r_bead
+                        for frac in (0.25, 0.5, 0.75, 1.0):
+                            for k in range(16):
+                                a_ = 2.0 * math.pi * k / 16
+                                qx = cp.x + reach * frac * math.cos(a_)
+                                qy = cp.y + reach * frac * math.sin(a_)
+                                if not field.blocked(qx, qy, z_end):
+                                    px, py = qx, qy
+                                    break
+                            if px is not None:
+                                break
+                if px is not None:
+                    node = skeleton.add_node(px, py, z_end, None, bed_radius,
                                              cp.layer, kind="contact")
                     skeleton.nodes[node].on_bed = True
                 else:

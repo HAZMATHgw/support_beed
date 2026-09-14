@@ -275,7 +275,7 @@ def _generate_tree_support(
         ceiling_targets.append((n.x, n.y, expected_z))
     seeds, ceiling_filled, resolved_tops = close_ceiling_gaps(
         seeds, mesh, ceiling_targets, body_params.bead_diameter_mm,
-        gen.xy_clearance_mm, embed=embed, max_beads=limit,
+        gen.xy_clearance_mm, embed=embed, max_beads=limit, bed_z=z0,
     )
     tip_nodes = [(n.x, n.y, resolved if resolved is not None else n.z)
                 for n, resolved in zip(contact_nodes, resolved_tops)]

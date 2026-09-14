@@ -267,7 +267,7 @@ def repair_support_paths(seeds, mesh, bed_z, bead_diameter, xy_clearance,
 
 
 def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
-                       embed=0.0, max_beads=None):
+                       embed=0.0, max_beads=None, bed_z=0.0):
     """Stack beads up to the real overhang surface under each leaf contact.
 
     A tree contact's height comes from one representative overhang sample,
@@ -349,7 +349,21 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         near_height = [j for j in nearby if beads[j, 2] <= expected_z + bead_diameter]
         if not near_height:
             continue
-        top_idx = max(near_height, key=lambda j: beads[j, 2])
+        # ``nearby`` is a generous net (2 bead diameters) so a leaning branch's
+        # own tip is never missed, but that net is wide enough to also catch a
+        # neighbouring contact's branch when two contacts sit only a few
+        # millimetres apart (common right where several shallow overhangs get
+        # sampled close together). Picking the tallest bead in the whole net
+        # can then grab that neighbour's bead instead of this contact's own —
+        # the neighbour gets "fixed" twice while this contact's real gap is
+        # never touched, leaving it unconnected. This contact's own bead sits
+        # at (x, y) almost exactly (it was placed there), so prefer candidates
+        # close to the target and only fall back to the wide net if none is
+        # that close.
+        close_by = [j for j in near_height
+                   if math.hypot(beads[j, 0] - x, beads[j, 1] - y) <= 0.5 * bead_diameter]
+        pool = close_by or near_height
+        top_idx = max(pool, key=lambda j: beads[j, 2])
         top = beads[top_idx, :3]
         # The bead this branch already rests on, if any — lifting ``top``
         # must not pull it out of reach of this one, or the chain breaks
@@ -386,8 +400,28 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         direction = (closest - top) / distance if distance > 1e-9 else np.array([0.0, 0.0, 1.0])
         target = top + direction * gap
         target_centre = tuple(float(v) for v in target)
-        safe_to_move = True
-        if gap <= step and below_idx is not None:
+        # A bead already relocated for an earlier target in this same pass
+        # must not be moved again: two nearby contacts can independently pick
+        # the same existing bead as their "top", and a second move would
+        # silently overwrite the first target's fix — that earlier target's
+        # ``resolved`` height would then point at a spot the bead no longer
+        # occupies, reporting a connection that no longer exists. Route this
+        # target through the chain-insertion branch instead, which adds new
+        # beads above the bead's current (already-corrected) position rather
+        # than relocating it a second time.
+        safe_to_move = top_idx not in moved
+        # A contact with nothing else nearby (no below_idx — it rests
+        # directly on the bed, the common case for a shallow overhang just
+        # above the build plate) has nothing for the below_idx check to
+        # verify against, so it silently passed as "safe" even when the lift
+        # cleared the bed by a full bead radius or more, stranding it: the
+        # bed was the only thing it was ever resting on. Require the moved
+        # position to still touch the bed whenever the original did.
+        top_radius = 0.5 * float(beads[top_idx, 3])
+        was_on_bed = top[2] - top_radius <= bed_z + max(1e-7, 0.02 * top_radius)
+        if gap <= step and safe_to_move and was_on_bed:
+            safe_to_move = target[2] - top_radius <= bed_z + max(1e-7, 0.02 * top_radius)
+        if gap <= step and safe_to_move and below_idx is not None:
             required = 0.98 * (radius + 0.5 * float(beads[below_idx, 3]))
             safe_to_move = np.linalg.norm(target - beads[below_idx, :3]) <= required
         if gap <= step and safe_to_move:
