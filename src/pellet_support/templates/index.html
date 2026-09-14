@@ -136,7 +136,7 @@
   <h1>펠릿 서포터 생성기</h1>
   <p>모델 파일을 올리면 필요한 접점을 골라 가지로 연결한 구슬 서포터를 만들어
      같은 형식으로 되돌려줍니다. 접점 간격을 키우면 받치는 위치와 구슬 수가 줄어듭니다.
-     <b>출력할 때는 표시된 프로파일 층높이를 사용하세요.</b></p>
+     <b>출력 층높이는 노즐과 소재에 맞는 슬라이서 프로파일을 사용하세요.</b></p>
 </header>
 
 <div class="grid">
@@ -331,7 +331,7 @@
     <div class="card">
       <h2>충전 기하</h2>
       <dl class="readout">
-        <div class="cell key"><dt>프로파일 층높이</dt><dd id="o-layer">—<small>mm</small></dd></div>
+        <div class="cell key"><dt>구슬 배치 세로 간격</dt><dd id="o-layer">—<small>mm</small></dd></div>
         <div class="cell"><dt>구슬 간격 pitch</dt><dd id="o-pitch">—<small>mm</small></dd></div>
         <div class="cell"><dt>접촉원 지름</dt><dd id="o-disc">—<small>mm</small></dd></div>
         <div class="cell"><dt>배위수</dt><dd id="o-coord">—</dd></div>
@@ -369,7 +369,7 @@
       <ol class="next">
         <li>슬라이서에 원본 모델과 서포터 파일을 <b>따로</b> 불러옵니다 (좌표가 같아 그대로 겹칩니다)</li>
         <li>서포터 오브젝트를 서포터 익스트루더에 할당합니다</li>
-        <li>층높이를 위에 표시된 값으로 맞춥니다</li>
+        <li>인쇄 층높이는 노즐과 소재에 맞는 슬라이서 프로파일로 설정합니다</li>
         <li>슬라이서 자체 서포터 기능은 <b>끕니다</b></li>
       </ol>
       <img class="preview" id="preview" alt="" style="display:none">
@@ -383,10 +383,12 @@ const TETRA = 0.8164965809277260;
 const $ = id => document.getElementById(id);
 const num = id => parseFloat($(id).value);
 
-function geometry(){
+function geometry(diameterOverride){
   const nozzle = num('nozzle');
   const beadInput = $('bead_diameter').value.trim();
-  const D = beadInput ? parseFloat(beadInput) : nozzle * 0.5;   // 서버의 make_params 와 동일한 기본값
+  const D = Number.isFinite(diameterOverride) && diameterOverride > 0
+    ? diameterOverride
+    : (beadInput ? parseFloat(beadInput) : nozzle * 0.5);
   const delta = num('overlap');
   const latRaw = $('lateral_overlap').value.trim();
   const verRaw = $('vertical_overlap').value.trim();
@@ -413,8 +415,8 @@ function geometry(){
           pack: cell>0 ? vol/cell : 0, stagger, aniso: dLat !== dVer};
 }
 
-function render(){
-  const g = geometry();
+function render(diameterOverride){
+  const g = geometry(diameterOverride);
   if(!isFinite(g.pitch) || g.pitch <= 0) return;
   const autoBead = num('nozzle') * 0.5;
   $('beadHint').textContent = $('bead_diameter').value.trim()
@@ -442,8 +444,8 @@ function render(){
     note.textContent = '충전율이 너무 높습니다. 구슬이 뭉쳐 통짜가 되고 분리가 어려워집니다.';
     note.classList.add('warn');
   } else {
-    note.textContent = '프린트 프로파일의 층높이를 ' + g.layerH.toFixed(3) +
-      ' mm 로 맞추세요. 이 값이 어긋나면 구슬이 아래층에 닿지 않거나 뭉개집니다.';
+    note.textContent = '구슬 중심의 세로 배치 간격은 ' + g.layerH.toFixed(3) +
+      ' mm 입니다. 인쇄 층높이는 슬라이서에서 노즐과 소재에 맞게 설정하세요.';
   }
   drawLattice(g);
 }
@@ -614,6 +616,7 @@ $('go').addEventListener('click', async () => {
       break;
     }
 
+    render(data.bead_diameter);
     $('dls').innerHTML = data.files
       .map(f => `<a class="dl" href="${f.url}" download>↓ ${f.label} · ${f.name}</a>`).join('');
     $('r-beads').textContent = data.beads.toLocaleString();
@@ -628,9 +631,11 @@ $('go').addEventListener('click', async () => {
         + `트렁크 세장비 ${data.tree_trunk_slenderness} · `
         + (data.tree_bracing ? '가새 보강 켜짐' : '가새 보강 꺼짐')
         + (data.tree_stats ? ` · 유지 접점 ${data.tree_stats.supported_contacts}/${data.tree_stats.requested_contacts}` : '')
+        + (data.tree_stats && data.tree_stats.attached_contacts !== undefined
+          ? ` · 천장 연결 ${data.tree_stats.attached_contacts}/${data.tree_stats.requested_contacts}` : '')
       : (c !== null && c < 10)
       ? '측정 배위수가 낮습니다. 서포터 단면이 얇아 가장자리 구슬 비중이 크면 정상입니다. '
-        + '넓은 면을 받치는데도 낮다면 층높이 설정을 확인하세요.'
+        + '넓은 면을 받치는데도 낮다면 구슬 겹침과 배치 간격을 확인하세요.'
       : '';
     if(data.preview){
       $('preview').src = data.preview; $('preview').style.display = 'block';
@@ -645,7 +650,7 @@ $('go').addEventListener('click', async () => {
       ? data.notes.map(m => `<p class="note warn">${m.replace(/\n/g,'<br>')}</p>`).join('')
       : '';
     $('result').style.display = 'block';
-    $('status').textContent = `레이어 ${data.layers}개 · 층높이 ${data.layer_height} mm`;
+    $('status').textContent = `생성 레이어 ${data.layers}개 · 구슬 배치 세로 간격 ${data.layer_height} mm`;
   }catch(e){
     err.textContent = e.message; err.style.display = 'block';
     $('status').textContent = '';

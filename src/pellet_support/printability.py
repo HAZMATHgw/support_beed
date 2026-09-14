@@ -105,6 +105,36 @@ def supported_mask(seeds, mesh, bed_z=0.0):
     return _initial_support(beads, mesh, bed_z, graph)[0]
 
 
+def _outside_from_surface(mesh, points, closest, distance, faces):
+    """Apply Trimesh's signed-distance test to an existing nearest query.
+
+    Face-interior projections determine the sign from the outward normal;
+    projections beyond an edge still need the same containment ray test.
+    Keeping that distinction matters around concave edges and open meshes.
+    """
+    from trimesh.constants import tol
+    from trimesh.triangles import points_to_barycentric
+    from trimesh.util import diagonal_dot
+
+    outside = distance <= 1e-7
+    nonzero = np.flatnonzero(distance > tol.merge)
+    if not len(nonzero):
+        return outside
+    normals = mesh.face_normals[faces[nonzero]]
+    delta = points[nonzero] - closest[nonzero]
+    projection = points[nonzero] - (normals.T * diagonal_dot(delta, normals)).T
+    barycentric = points_to_barycentric(mesh.triangles[faces[nonzero]], projection)
+    on_face = ~((barycentric < -tol.merge) | (barycentric > 1 + tol.merge)).any(axis=1)
+    direct = nonzero[on_face]
+    sign = np.sign(diagonal_dot(normals[on_face], points[direct] - projection[on_face]))
+    outside[direct] = -distance[direct] * sign <= 1e-7
+    edge = nonzero[~on_face]
+    if len(edge):
+        inside = mesh.ray.contains_points(points[edge])
+        outside[edge] = distance[edge] * (inside.astype(int) * 2 - 1) <= 1e-7
+    return outside
+
+
 def repair_support_paths(seeds, mesh, bed_z, bead_diameter, xy_clearance,
                          z_gap=0.3, max_beads=None, allow_model=True,
                          progress_callback=None):
@@ -125,7 +155,9 @@ def repair_support_paths(seeds, mesh, bed_z, bead_diameter, xy_clearance,
     step = 0.88 * min(bead_diameter, float(beads[:, 3].min()))
     max_radius = max(radius, beads[:, 3].max() * 0.5)
     budget = max_beads if max_beads is not None else 2_000_000
-    pq = mesh.nearest if mesh is not None else None
+    from .surface_query import CachedSurfaceQuery
+
+    pq = CachedSurfaceQuery(mesh) if mesh is not None else None
     added_tree = None
     indexed_added = 0
     point_safety = {}
@@ -145,12 +177,21 @@ def repair_support_paths(seeds, mesh, bed_z, bead_diameter, xy_clearance,
             required = np.full(len(p), radius + xy_clearance)
             required[above] = radius + min(z_gap, xy_clearance)
             required[below] = radius
-            result[start:start + len(p)] = ((distance >= required - 1e-7)
-                                            & (pq.signed_distance(p) <= 1e-7))
+            clear = distance >= required - 1e-7
+            # A point already too close cannot become safe after a sign test.
+            # Reuse the nearest face for the remaining points instead of doing
+            # a second full nearest-triangle query inside signed_distance.
+            check = np.flatnonzero(clear)
+            if len(check):
+                clear[check] &= _outside_from_surface(
+                    mesh, p[check], closest[check], distance[check], faces[check])
+            result[start:start + len(p)] = clear
         return result
 
     def safe_path(path):
         keys = [tuple(point[:3]) for point in path]
+        if any(key in point_safety and not point_safety[key] for key in keys):
+            return False
         missing = list(dict.fromkeys(key for key in keys if key not in point_safety))
         if missing:
             point_safety.update(zip(missing, check_points(np.asarray(missing))))
@@ -267,188 +308,208 @@ def repair_support_paths(seeds, mesh, bed_z, bead_diameter, xy_clearance,
 
 
 def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
-                       embed=0.0, max_beads=None):
-    """Stack beads up to the real overhang surface under each leaf contact.
+                       embed=0.0, max_beads=None, contact_offset=None,
+                       contact_status=None, progress_callback=None,
+                       contact_origins=None, contact_positions=None):
+    """Connect leaves to a real underside without moving their foundations.
 
-    A tree contact's height comes from one representative overhang sample,
-    but wider contact spacing (used to cut bead counts) makes that sample
-    less likely to match the true local ceiling height at the exact XY where
-    the branch actually lands. The result is a leaf that stops short of the
-    surface it is meant to hold up, sometimes by several millimetres.
+    Try the nearest underside and the first ceiling directly above the leaf.
+    Every extension must rise at most 45 degrees from vertical and overlap its
+    lower bead, including mixed diameters. Original beads are never lifted.
+    XY clearance applies to the approach. The final contact uses exact sphere
+    clearance so narrow roofs can be held up; every neighbouring face is still
+    checked against penetration, including side walls and thin roof tops.
 
-    The support must actually touch the model to hold it up, so the fix
-    lands the final bead ``embed`` into the surface (the same idea as
-    neighbouring beads pressing into each other) rather than short of it —
-    a real, if shallow, joint instead of a gap with nothing to bridge. This
-    also closes the small by-design clearance every contact is placed with
-    (not just the occasional large miss): when the shortfall fits within one
-    bead's reach *and* lifting the existing top bead would not pull it out
-    of reach of whatever it was already resting on, that bead is moved in
-    place rather than stacking a near-duplicate on top of it. Otherwise
-    (including when a "safe" lift would strand the bead beneath it) a chain
-    of new beads is inserted above the original, unmoved top bead instead,
-    so the connection that was already there never breaks.
-
-    ``targets`` is a sequence of ``(x, y, expected_z)`` — the contact's
-    original (pre-offset) overhang height, used only as a sanity check on
-    the search; the real surface is found as the closest point on the mesh
-    to the branch's own topmost bead, in whatever direction that is — not
-    necessarily straight up, since a twisty branch need not lean the same
-    way as its own ceiling.
-
-    Returns ``(seeds, corrections, resolved_z)``. ``resolved_z`` has one
-    entry per target: the z of the bead now sitting at (or past) that
-    contact's true, embedded surface, or ``None`` where no correction could
-    be made (no nearby bead, no usable nearby surface, budget exhausted,
-    ...). Callers that
-    check "does every contact have a connected bead" must compare against
-    this corrected height instead of the contact's original, pre-correction
-    height — a large but legitimate correction (the whole reason this
-    function exists) would otherwise look identical to a real disconnection.
+    Returns (seeds, added_count, resolved_z), preserving the public tuple from
+    the angled-contact correction. Optional contact_positions records full XYZ
+    coordinates for cleanup/diagnostics when the corrected tip moves sideways.
+    contact_origins identifies the intended surviving leaf, including contacts
+    clamped to the bed; contact_offset is a fallback for older callers.
     """
+    resolved = [None] * len(targets)
+    if contact_status is not None:
+        contact_status[:] = [False] * len(targets)
+    if contact_positions is not None:
+        contact_positions[:] = resolved
     if not len(seeds) or not len(targets) or mesh is None:
-        return list(seeds), 0, [None] * len(targets)
+        return list(seeds), 0, resolved
+    from trimesh.triangles import closest_point
+
     beads = np.asarray(seeds, dtype=float)
-    tree = cKDTree(beads[:, :2])
     radius = 0.5 * bead_diameter
-    step = 0.88 * bead_diameter
+    embed = min(max(0.0, embed), 0.5 * radius)
     budget = max_beads if max_beads is not None else 2_000_000
-    pq = mesh.nearest
-    added = []
-    moved = {}
-    resolved: list = [None] * len(targets)
-    point_safety = {}
+    xy_tree = cKDTree(beads[:, :2])
+    face_tree = mesh.triangles_tree
+    triangles, normals = mesh.triangles, mesh.face_normals
+    ceiling_normal = 0.3
+    added, selected = [], []
+    completed = {}
+    for target_index, (x, y, expected_z) in enumerate(targets):
+        nearby = xy_tree.query_ball_point([x, y], bead_diameter * 2.0)
+        nearby = [j for j in nearby if beads[j, 2] < expected_z - 1e-8]
+        nominal = None
+        if contact_origins is not None:
+            nominal = np.asarray(contact_origins[target_index], dtype=float)
+        elif contact_offset is not None:
+            nominal = np.array([x, y, expected_z - contact_offset])
+        if nominal is not None:
+            nearby = [j for j in nearby
+                      if np.linalg.norm(beads[j, :3] - nominal) <= 2 * bead_diameter]
+            key = lambda j: np.linalg.norm(beads[j, :3] - nominal)
+        else:
+            key = lambda j: (expected_z - beads[j, 2],
+                             np.linalg.norm(beads[j, :2] - [x, y]))
+        if nearby:
+            selected.append((target_index, min(nearby, key=key), expected_z))
+    if not selected:
+        return list(seeds), 0, resolved
 
-    def check_points(points):
-        result = np.ones(len(points), dtype=bool)
-        required = radius + xy_clearance
-        for start in range(0, len(points), 256):
-            p = points[start:start + 256]
-            distance = pq.on_surface(p)[1]
-            result[start:start + len(p)] = ((distance >= required - 1e-7)
-                                            & (pq.signed_distance(p) <= 1e-7))
-        return result
+    top_ids = list(dict.fromkeys(item[1] for item in selected))
+    ceilings, nearest, upward_hits = {}, {}, {}
+    for start in range(0, len(top_ids), 512):
+        ids = top_ids[start:start + 512]
+        points = beads[ids, :3]
+        locations, rays, faces = mesh.ray.intersects_location(
+            points, np.tile([0.0, 0.0, 1.0], (len(ids), 1)), multiple_hits=True)
+        for location, ray, face in zip(locations, rays, faces):
+            upward_hits.setdefault(ids[ray], []).append((location, normals[face]))
+        for idx in ids:
+            hits = upward_hits.get(idx, [])
+            hits.sort(key=lambda hit: hit[0][2])
+            if hits and hits[0][1][2] <= -ceiling_normal:
+                ceilings[idx] = hits[0]
+        closest, distances, faces = mesh.nearest.on_surface(points)
+        for idx, point, distance, face in zip(ids, closest, distances, faces):
+            if normals[face, 2] <= -ceiling_normal and point[2] > beads[idx, 2]:
+                nearest[idx] = (point, distance, normals[face])
 
-    def safe_path(path):
-        keys = [tuple(point[:3]) for point in path]
-        missing = list(dict.fromkeys(key for key in keys if key not in point_safety))
-        if missing:
-            point_safety.update(zip(missing, check_points(np.asarray(missing))))
-        return all(point_safety[key] for key in keys)
+    def safe_path(path, surface_point, surface_normal):
+        points = np.asarray(path)[:, :3]
+        point_ids, face_ids = [], []
+        reach = radius + max(xy_clearance, 0.0) + 1e-7
+        for i, point in enumerate(points):
+            candidates = list(face_tree.intersection(
+                np.concatenate((point - reach, point + reach))))
+            point_ids.extend([i] * len(candidates))
+            face_ids.extend(candidates)
+        if not face_ids:
+            return False
+        point_ids = np.asarray(point_ids, dtype=int)
+        face_ids = np.asarray(face_ids, dtype=int)
+        final_contact = False
+        for start in range(0, len(face_ids), 8192):
+            ids = point_ids[start:start + 8192]
+            faces = face_ids[start:start + 8192]
+            points_for_faces = points[ids]
+            closest = closest_point(triangles[faces], points_for_faces)
+            delta = closest - points_for_faces
+            distance = np.linalg.norm(delta, axis=1)
+            normal = normals[faces]
+            above = (normal[:, 2] <= -ceiling_normal) & (delta[:, 2] > 0)
+            last = ids == len(points) - 1
+            required = np.full(len(ids), radius + xy_clearance)
+            # Opposite faces behind a thin roof/floor are not side walls.
+            required[np.abs(normal[:, 2]) >= ceiling_normal] = radius
+            # Horizontal clearance ends at the contact interface. Roof edges
+            # behind that surface must not reject a valid underside joint;
+            # their actual sphere clearance is still checked, including walls.
+            behind_contact = ((closest - surface_point) @ surface_normal <= embed + 1e-7)
+            required[behind_contact] = radius
+            required[last] = radius
+            required[above & last] = radius - embed
+            if np.any(distance < required - 1e-7):
+                return False
+            final_contact |= bool(np.any(last & above & (distance <= radius + 1e-7)))
+        return final_contact
 
-    for t_idx, (x, y, expected_z) in enumerate(targets):
-        nearby = tree.query_ball_point([x, y], bead_diameter * 2.0)
-        if not nearby:
-            continue
-        # A tall, densely routed model can put an unrelated branch's bead at
-        # a similar XY but a wildly different Z (e.g. one lattice column
-        # passing near another's base). Restrict to beads actually near this
-        # contact's own expected height before taking "the top one", or a
-        # distant branch gets mistaken for this contact's tip and the real
-        # gap here never gets corrected.
-        near_height = [j for j in nearby if beads[j, 2] <= expected_z + bead_diameter]
-        if not near_height:
-            continue
-        top_idx = max(near_height, key=lambda j: beads[j, 2])
+    def mark(index, position):
+        if position is not None:
+            position = tuple(float(v) for v in position)
+            resolved[index] = position[2]
+            if contact_status is not None:
+                contact_status[index] = True
+            if contact_positions is not None:
+                contact_positions[index] = position
+
+    for processed, (target_index, top_idx, expected_z) in enumerate(selected, 1):
+        if progress_callback and (processed == 1 or processed % 100 == 0):
+            progress_callback(f"천장 틈 보정 · {processed}/{len(selected)}")
         top = beads[top_idx, :3]
-        # The bead this branch already rests on, if any — lifting ``top``
-        # must not pull it out of reach of this one, or the chain breaks
-        # exactly where it used to be connected.
-        below = [j for j in near_height if j != top_idx]
-        below_idx = max(below, key=lambda j: beads[j, 2]) if below else None
-        # A twisty branch does not necessarily lean the same way its actual
-        # ceiling does, so the nearest overhang surface to a tip is often not
-        # straight above it — a purely vertical ray can sail past a ceiling
-        # that is off to one side and find nothing (or the wrong thing).
-        # ``on_surface`` finds the true closest point in any direction, which
-        # is what the printed gap actually depends on.
-        closest, distance, face_idx = pq.on_surface([top])
-        closest, distance, face_idx = closest[0], float(distance[0]), face_idx[0]
-        normal = mesh.face_normals[face_idx]
-        # Only a downward-facing surface is a ceiling this contact can hang
-        # from; the closest point on a side wall or something below is not
-        # what this correction is for. This does not need to match the 45
-        # degree overhang threshold that flagged the contact in the first
-        # place -- detection measures the angle from stacked cross-sections,
-        # not one triangle's own normal, so a genuinely overhanging spot can
-        # still land on a near-vertical triangle right at that threshold.
-        # Reject only surfaces that plainly face sideways or upward.
-        if normal[2] > -0.3:
+        # Identifying a target may require seeing later intersections, but a
+        # lower shelf cannot be reported as supporting the intended upper one.
+        hits = upward_hits.get(top_idx, [])
+        downward_hits = [hit for hit in hits if hit[1][2] <= -ceiling_normal]
+        if downward_hits and hits:
+            intended = min(downward_hits, key=lambda hit: abs(hit[0][2] - expected_z))
+            if intended[0][2] > hits[0][0][2] + 1e-7:
+                continue
+        options = []
+        near = nearest.get(top_idx)
+        if near is not None and abs(near[0][2] - expected_z) <= 3 * bead_diameter:
+            point, distance, normal = near
+            original_radius = 0.5 * beads[top_idx, 3]
+            # Embedding permits penetration, never an equally large air gap.
+            if original_radius - embed - 1e-7 <= distance <= original_radius + 1e-7:
+                mark(target_index, top)
+                continue
+            options.append((point + normal * (radius - embed), point, normal))
+        ceiling = ceilings.get(top_idx)
+        if ceiling is not None and abs(ceiling[0][2] - expected_z) <= 3 * bead_diameter:
+            point, normal = ceiling
+            options.append((np.array([top[0], top[1],
+                                      point[2] - (radius - embed) / -normal[2]]), point, normal))
+        if not options:
             continue
-        # The intended ceiling is close to the detection sample's original
-        # height; a much farther point is unrelated geometry entirely.
-        if abs(closest[2] - expected_z) > 3.0 * bead_diameter:
+        if top_idx in completed:
+            mark(target_index, completed[top_idx])
             continue
-        gap = distance - radius + embed
-        if gap <= 1e-9:
-            resolved[t_idx] = float(top[2])
-            continue
-        direction = (closest - top) / distance if distance > 1e-9 else np.array([0.0, 0.0, 1.0])
-        target = top + direction * gap
-        target_centre = tuple(float(v) for v in target)
-        safe_to_move = True
-        if gap <= step and below_idx is not None:
-            required = 0.98 * (radius + 0.5 * float(beads[below_idx, 3]))
-            safe_to_move = np.linalg.norm(target - beads[below_idx, :3]) <= required
-        if gap <= step and safe_to_move:
-            # The base placement left only the usual by-design clearance
-            # short of the surface. Lift that same bead into a shallow
-            # embed rather than stacking a near-duplicate bead a fraction
-            # of a millimetre above it.
-            beads[top_idx, :3] = target
-            moved[top_idx] = target_centre
-            resolved[t_idx] = target_centre[2]
-            continue
-        count = max(1, int(math.ceil(gap / step)))
-        if len(seeds) + len(added) + count > budget:
-            continue
-        path = [(*map(float, top + direction * (gap * (i / count))), bead_diameter)
-                for i in range(1, count + 1)]
-        # The last bead is meant to press into the surface by design, so
-        # only the beads leading up to it are checked for stray collisions.
-        path, final = path[:-1], path[-1:]
-        if path and not safe_path(path):
-            continue
-        added.extend(path)
-        added.extend(final)
-        resolved[t_idx] = final[0][2]
-    result = [(*moved[i], d) if i in moved else (x, y, z, d)
-              for i, (x, y, z, d) in enumerate(seeds)]
-    return result + added, len(added) + len(moved), resolved
+        options.sort(key=lambda item: np.linalg.norm(item[0] - top))
+        for target, surface_point, surface_normal in options:
+            delta = target - top
+            length = np.linalg.norm(delta)
+            if delta[2] <= 1e-8 or np.linalg.norm(delta[:2]) > delta[2] + 1e-9:
+                continue
+            first_step = 0.88 * (radius + 0.5 * beads[top_idx, 3])
+            step = 0.88 * bead_diameter
+            count = 1 + max(0, int(math.ceil((length - first_step) / step)))
+            if len(seeds) + len(added) + count > budget:
+                continue
+            distances = ([length] if count == 1 else
+                         np.linspace(first_step, length, count).tolist())
+            path = [(*map(float, top + delta * (distance / length)), bead_diameter)
+                    for distance in distances]
+            if not safe_path(path, surface_point, surface_normal):
+                continue
+            added.extend(path)
+            completed[top_idx] = target
+            mark(target_index, target)
+            break
+    return list(seeds) + added, len(added), resolved
 
 
 def dedupe_seeds(seeds, tolerance=0.02):
-    """Merge beads whose centres coincide within ``tolerance`` mm.
+    """Remove identical spheres apart from numerical noise, retaining order.
 
-    Independent passes (trunk hex-fill, bracing, repair, ceiling-gap
-    correction) can each place a bead near the same spot without checking
-    what the others already put there. Two beads on top of each other add no
-    strength and read as a lumpy, uneven clump — keep the first and drop the
-    rest.
-
-    A looser, overlap-ratio-based version of this (dropping any pair deeper
-    than some fraction of a diameter, not just near-exact coincidence) was
-    tried and reverted: bracing and repair deliberately press a new bead
-    deep into an existing one to guarantee a firm joint between two trunks
-    that would otherwise stand separately, and that check could not tell a
-    redundant clump from an intentional deep joint — it silently deleted the
-    very beads ``test_bracing_ties_separate_trunks_together`` and the
-    point-four-mm connectivity tests exist to require. Only exact
-    coincidence is safe to remove generically.
+    Even a small centre offset may provide the only overlap with a neighbour,
+    and coincident spheres of different sizes need not share a foundation.
+    Without rechecking model contact and every support edge, only identical
+    geometry is redundant. ``tolerance`` remains accepted for compatibility;
+    it no longer allows removal of geometrically distinct spheres.
     """
-    if not seeds:
+    if not len(seeds):
         return list(seeds), 0
     beads = np.asarray(seeds, dtype=float)
-    tree = cKDTree(beads[:, :3])
-    pairs = tree.query_pairs(tolerance, output_type="ndarray")
-    if not len(pairs):
-        return list(seeds), 0
-    drop = np.zeros(len(beads), dtype=bool)
-    for a, b in pairs:
-        if not drop[a]:
-            drop[int(b)] = True
-    kept = [s for s, d in zip(seeds, drop) if not d]
-    return kept, int(drop.sum())
+    # Sorting rows avoids materializing O(n^2) pairs when many construction
+    # passes produce the same bead, while preserving every retained position.
+    keys = beads.copy()
+    # Symmetric paths can produce +5e-17 and -5e-17 for the same coordinate.
+    # This precision is far below geometry tolerances; retained spheres are
+    # not rounded or moved, and their diameters must still match exactly.
+    keys[:, :3] = np.round(keys[:, :3], 12)
+    _, first = np.unique(keys, axis=0, return_index=True)
+    first.sort()
+    return [seeds[int(i)] for i in first], len(seeds) - len(first)
 
 
 def prune_disconnected_fill(seeds, contact_points, bed_z, max_cluster_size=8,
@@ -466,12 +527,13 @@ def prune_disconnected_fill(seeds, contact_points, bed_z, max_cluster_size=8,
     branch that legitimately lands away from a sampled contact is never
     touched.
     """
-    if not seeds:
+    if not len(seeds):
         return list(seeds), 0
     beads = np.asarray(seeds, dtype=float)
     radii = beads[:, 3] * 0.5
     tree = cKDTree(beads[:, :3])
-    pairs = tree.query_pairs(float(radii.max()) * 2.0, output_type="ndarray")
+    pairs = tree.query_pairs(float(radii.max()) * 2.0 * (1.0 + touch_slack),
+                             output_type="ndarray")
     n = len(beads)
     if len(pairs):
         delta = beads[pairs[:, 1], :3] - beads[pairs[:, 0], :3]
@@ -482,19 +544,20 @@ def prune_disconnected_fill(seeds, contact_points, bed_z, max_cluster_size=8,
     from scipy.sparse.csgraph import connected_components
     graph = csr_matrix((np.ones(len(pairs), dtype=bool), (pairs[:, 0], pairs[:, 1])),
                        shape=(n, n)) if len(pairs) else csr_matrix((n, n), dtype=bool)
-    _, labels = connected_components(graph, directed=False)
+    component_count, labels = connected_components(graph, directed=False)
     bed_tolerance = np.maximum(1e-6, 0.25 * radii)
     on_bed = (beads[:, 2] - radii) <= bed_z + bed_tolerance
-    contacts = np.asarray(contact_points, dtype=float) if len(contact_points) else None
-    contact_tree = cKDTree(contacts) if contacts is not None and len(contacts) else None
-    keep = np.ones(n, dtype=bool)
-    for label in np.unique(labels):
-        members = np.flatnonzero(labels == label)
-        if len(members) > max_cluster_size or on_bed[members].any():
-            continue
-        if contact_tree is not None:
-            near, _ = contact_tree.query(beads[members, :3])
-            if (near <= radii[members] * 1.5).any():
-                continue
-        keep[members] = False
+    sizes = np.bincount(labels, minlength=component_count)
+    protected = ((sizes > max_cluster_size)
+                 | (np.bincount(labels, weights=on_bed,
+                                minlength=component_count) > 0))
+    # Classify all remaining groups in one pass. Scanning all n labels once
+    # per isolated cluster otherwise turns cleanup into quadratic work.
+    candidates = np.flatnonzero(~protected[labels])
+    if len(candidates) and len(contact_points):
+        contact_tree = cKDTree(np.asarray(contact_points, dtype=float))
+        near, _ = contact_tree.query(beads[candidates, :3])
+        at_contact = candidates[near <= radii[candidates] * 1.5]
+        protected[labels[at_contact]] = True
+    keep = protected[labels]
     return [s for s, k in zip(seeds, keep) if k], int((~keep).sum())

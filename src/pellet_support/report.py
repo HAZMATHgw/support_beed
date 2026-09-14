@@ -15,9 +15,47 @@ from .params import SupportBeadParams, SupportBeadRegion, SupportGenParams
 from .slicing import clean
 
 
+def _weld_open_boundaries(mesh: trimesh.Trimesh, tolerance: float = 0.001) -> None:
+    """Repair tiny cracks without changing already closed thin features.
+
+    Decimal rounding is not a distance tolerance: two nearly identical
+    coordinates can fall on opposite sides of a rounding boundary. Search
+    actual boundary-vertex distances instead, and never move a vertex more
+    than ``tolerance`` from the representative it is merged into.
+    """
+    if mesh.is_watertight:
+        return
+    from scipy.spatial import cKDTree
+
+    counts = np.bincount(mesh.edges_unique_inverse)
+    boundary = np.unique(mesh.edges_unique[counts == 1])
+    if len(boundary) < 2:
+        return
+    pairs = cKDTree(mesh.vertices[boundary]).query_pairs(
+        tolerance, output_type="ndarray")
+    if not len(pairs):
+        return
+    # Choose representatives in vertex order. Do not transitively merge a
+    # chain of close neighbours whose endpoints exceed the tolerance.
+    pairs = pairs[np.lexsort((pairs[:, 1], pairs[:, 0]))]
+    representatives = np.arange(len(boundary))
+    starts = np.r_[0, np.flatnonzero(np.diff(pairs[:, 0])) + 1, len(pairs)]
+    for start, stop in zip(starts[:-1], starts[1:]):
+        source = pairs[start, 0]
+        if representatives[source] != source:
+            continue
+        neighbours = pairs[start:stop, 1]
+        available = neighbours[representatives[neighbours] == neighbours]
+        representatives[available] = source
+    inverse = np.arange(len(mesh.vertices))
+    inverse[boundary] = boundary[representatives]
+    keep = np.unique(inverse)
+    mesh.update_vertices(keep, inverse=np.searchsorted(keep, inverse))
+
+
 def load_mesh(path: str) -> trimesh.Trimesh:
     try:
-        obj = trimesh.load(path, force="mesh")
+        obj = trimesh.load(path)
     except ModuleNotFoundError as exc:
         # trimesh 는 포맷별 로더의 의존성을 선택 설치로 둔다. 특히 3MF 는
         # 오브젝트 계층을 푸는 데 networkx 가 필요한데, 없으면 파일을 열지도
@@ -37,20 +75,27 @@ def load_mesh(path: str) -> trimesh.Trimesh:
         raise RuntimeError(f"이 형식을 여는 데 필요한 패키지가 없습니다: {exc}") from exc
 
     if isinstance(obj, trimesh.Scene):
+        # Flattening a multi-object scene discards its units metadata.
+        # Convert first, including the instance translations in its graph.
+        scene_units = obj.units
+        if scene_units is not None:
+            obj = obj.convert_units("mm")
         obj = trimesh.util.concatenate(list(obj.dump()))
+        if scene_units is not None:
+            obj.units = "mm"
     if not isinstance(obj, trimesh.Trimesh) or obj.is_empty:
         raise RuntimeError(f"메쉬를 읽지 못했습니다: {path}")
 
-    # 외부 도구(특히 삼각형을 대폭 줄이는 단순화기)가 저장한 메쉬는 원래
-    # 같은 점이어야 할 정점들을 부동소수점 오차만큼만 떨어뜨려 놓곤 한다.
-    # trimesh 의 기본 병합 허용치는 이걸 못 잡을 만큼 촘촘해서, 얇은 가지
-    # 하나가 수만 개의 먼지 조각으로 쪼개진 채로 남는다 — 그러면 오버행
-    # 탐지·광선 검사가 실제로는 이어진 자리에서 가짜 틈을 본다. 이 프로젝트가
-    # 다루는 크기(수 mm 단위 구슬)에서 0.001mm 이내는 확실히 같은 점이므로,
-    # 안전하게 한 번 더 병합한다.
-    obj.merge_vertices(digits_vertex=3)
+    # STL 등의 단위 없는 좌표는 기존처럼 mm 로 취급한다. 3MF 등에서
+    # 명시한 단위는 정점 병합과 비드 크기 계산 전에 mm 로 맞춘다.
+    if obj.units is not None:
+        obj.convert_units("mm")
+    _weld_open_boundaries(obj)
     obj.update_faces(obj.nondegenerate_faces())
     obj.update_faces(obj.unique_faces())
+    obj.remove_unreferenced_vertices()
+    if obj.is_empty:
+        raise RuntimeError(f"유효한 삼각형이 없는 메쉬입니다: {path}")
     return obj
 
 

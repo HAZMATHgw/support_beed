@@ -103,6 +103,17 @@ def validate_bead_params(params: SupportBeadParams, label: str = "구슬") -> No
 
 def validate_gen_params(gen: SupportGenParams) -> None:
     """서포터 영역 탐지 파라미터 검사."""
+    for name, value in (
+        ("노즐 지름", gen.nozzle_diameter_mm),
+        ("최소 구슬/노즐 비율", gen.min_bead_to_nozzle_ratio),
+        ("격자 자동 구슬 크기 비율", gen.auto_void_bead_ratio),
+        ("트리 자동 구슬 높이 비율", gen.auto_tree_height_ratio),
+    ):
+        _require(math.isfinite(value) and value > 0,
+                 f"{name}은 유한한 양수여야 합니다.")
+    _require(gen.min_bead_diameter_mm is None or
+             (math.isfinite(gen.min_bead_diameter_mm) and gen.min_bead_diameter_mm > 0),
+             "최소 구슬 지름은 유한한 양수(mm)여야 합니다. 비워두면 자동입니다.")
     _require(
         math.isfinite(gen.branch_angle_deg) and 0 <= gen.branch_angle_deg < 90,
         "트리 가지 각도는 수직 기준 0 이상 90도 미만이어야 합니다.",

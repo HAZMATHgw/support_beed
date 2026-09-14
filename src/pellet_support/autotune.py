@@ -57,7 +57,7 @@ class TuningResult:
     def summary(self) -> str:
         lines = [
             f"자동 선택: 기본 구슬 {self.chosen.bead_diameter_mm:.2f}mm "
-            f"(층높이 {self.chosen.layer_height_mm:.3f}mm)",
+            f"(구슬 배치 세로 간격 {self.chosen.layer_height_mm:.3f}mm)",
             f"  기본 구슬이 채우는 영역 {self.chosen.fillable_fraction * 100:.0f}% "
             f"/ 예상 {self.chosen.estimated_beads:,}개",
         ]
@@ -100,7 +100,8 @@ def auto_tune_bead_diameter(
     validate_bead_params(base_contact)
     report = progress_callback or (lambda stage: None)
     nozzle = gen.nozzle_diameter_mm
-    min_bead = gen.min_bead_diameter_mm or (nozzle * gen.min_bead_to_nozzle_ratio)
+    min_bead = (gen.min_bead_diameter_mm if gen.min_bead_diameter_mm is not None
+                else nozzle * gen.min_bead_to_nozzle_ratio)
     if steps < 2:
         steps = 2
 

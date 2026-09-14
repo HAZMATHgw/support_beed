@@ -1,0 +1,68 @@
+{
+  "model": "3DBenchy.stl",
+  "nozzle_diameter_mm": 0.4,
+  "contact_diameter_mm": 0.6177470000359198,
+  "body_diameter_mm": 0.5992145900348421,
+  "parameters": {
+    "overlap": 0.08,
+    "body_ratio": 0.97,
+    "xy_clearance_mm": 0.8,
+    "contact_z_gap_layers": 1,
+    "branch_angle_deg": 25,
+    "trunk_slenderness": 8,
+    "bracing": true,
+    "max_layers": 4000,
+    "detail": 1
+  },
+  "before": {
+    "commit": "bf29f12",
+    "seconds": 14.551716500000111,
+    "beads": 1935,
+    "requested_contacts": 31,
+    "retained_contacts": 29,
+    "actual_roof_contacts": 26,
+    "unsupported_beads": 0
+  },
+  "after": {
+    "seconds": 8.89015389999986,
+    "beads": 1939,
+    "requested_contacts": 31,
+    "retained_contacts": 29,
+    "actual_roof_contacts": 28,
+    "unsupported_beads": 0,
+    "contacts_with_unintended_penetration": 0
+  },
+  "preserved_angled_window_contacts": [
+    28,
+    29
+  ],
+  "additional_rear_roof_contacts": [
+    24,
+    25
+  ],
+  "unattached_contact_indices": [
+    26,
+    27,
+    30
+  ],
+  "timing_note": "Single local whole-pipeline runs including mesh generation; not physical print validation.",
+  "remaining_unattached": [
+    {
+      "target": 26,
+      "reason": "No surviving bead within two body diameters of the intended leaf."
+    },
+    {
+      "target": 27,
+      "reason": "No surviving bead within two body diameters of the intended leaf."
+    },
+    {
+      "target": 30,
+      "reason": "The two-bead extension requires an intermediate approach sphere whose side clearance is only about 0.57–0.58 mm, below the requested 0.8 mm. This is a clearance constraint, not an unavoidable sphere collision.",
+      "requested_xy_clearance_mm": 0.8,
+      "observed_approach_clearance_mm": [
+        0.5685995699133486,
+        0.578263938539944
+      ]
+    }
+  ]
+}

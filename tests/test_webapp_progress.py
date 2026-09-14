@@ -156,6 +156,7 @@ def test_real_tree_reports_each_stage_before_the_expensive_geometry_work(monkeyp
         (regions, "detect_overhangs", "오버행 탐색"),
         (skeleton, "extract_contact_points", "트리 접점 선택"),
         (skeleton, "grow_branches", "트리 가지 성장·병합"),
+        (skeleton, "smooth_branches", "가지 경로 다듬기"),
         (skeleton, "skeleton_to_bead_seeds", "트리 구슬 배치"),
         (skeleton, "add_bracing", "트리 가새 보강"),
         (skeleton, "settle_collisions", "모델 충돌 보정"),
@@ -173,4 +174,7 @@ def test_real_tree_reports_each_stage_before_the_expensive_geometry_work(monkeyp
     result = pipeline.generate_support(make_model("bridge"), gen, contact, body,
                                        detail=0, verbose=False, progress_callback=stages.append)
     assert not result.mesh.is_empty
-    assert entered == [message for _, _, message in operations]
+    # Cleanup repeats the lower-support audit after ceiling attachment.
+    expected = [message for _, _, message in operations]
+    expected.insert(-1, "떠 있는 구슬 정리")
+    assert entered == expected

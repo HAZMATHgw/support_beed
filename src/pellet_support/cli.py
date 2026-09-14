@@ -88,7 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = ap.add_argument_group("서포터 영역")
     s.add_argument("--layer-height", type=float, default=None,
-                   help="비우면 충전 기하에서 자동 계산 (권장)")
+                   help="구슬 배치 세로 간격(mm). 비우면 충전 기하에서 자동 계산. "
+                        "슬라이서의 인쇄 층높이는 별도로 설정합니다")
     s.add_argument("--overhang-angle", type=float, default=45.0)
     s.add_argument("--z-gap-layers", type=int, default=1)
     s.add_argument("--xy-clearance", type=float, default=0.8)
@@ -287,12 +288,14 @@ def _run(argv=None) -> int:
 
     print("[2/4] 충전 기하")
     print(f"      pitch = {contact_params.pitch_mm():.3f} mm,  "
-          f"층높이 = {layer_h:.3f} mm  <- 프로파일에 이 값을 쓰세요")
+          f"구슬 배치 세로 간격 = {layer_h:.3f} mm")
+    print("      인쇄 층높이는 노즐과 소재에 맞는 슬라이서 프로파일을 사용하세요.")
     report_packing(contact_params, body_params)
     if args.layer_height is not None:
         req = contact_params.layer_height_mm()
         if abs(args.layer_height - req) > 0.02:
-            print(f"      ! 층높이가 {req:.3f} mm 여야 구가 아래층과 닿습니다.")
+            print(f"      ! 구슬 배치 세로 간격의 계산값은 {req:.3f} mm 입니다. "
+                  "직접 바꾸면 구슬 사이 연결이 달라집니다.")
 
     print("[3/4] 오버행 탐색 + bead 배치")
     result = generate_support(

@@ -79,7 +79,10 @@ class SupportBeadParams:
         return self.bead_diameter_mm * (1.0 - self.vertical_overlap())
 
     def layer_height_mm(self) -> float:
-        """이 충전이 성립하기 위해 프로파일이 반드시 써야 하는 층높이.
+        """메시 안에서 구슬 중심을 쌓는 세로 간격.
+
+        내보낸 STL/3MF의 구슬 배치에 쓰며, 슬라이서의 인쇄 층높이와는
+        별개다. 실제 출력은 노즐과 소재에 맞는 슬라이서 프로파일을 쓴다.
 
         가로/세로 겹침이 같으면 기존과 똑같이 pitch*sqrt(2/3) 이 나온다.
         다르면, 아래 세 구슬과의 거리가 vertical_neighbor_distance 가 되도록

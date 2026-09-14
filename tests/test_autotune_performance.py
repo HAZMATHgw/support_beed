@@ -14,6 +14,7 @@ import trimesh
 
 from pellet_support import SupportGenParams, make_params
 from pellet_support import autotune
+from pellet_support.validation import InvalidParameterError
 
 
 @pytest.fixture
@@ -59,6 +60,22 @@ def geometry_spies(monkeypatch):
     monkeypatch.setattr(autotune, "detect_overhangs", spies["detect"], raising=False)
     monkeypatch.setattr(autotune, "fillable_fraction", spies["score"])
     return spies
+
+
+@pytest.mark.parametrize("field", [
+    "auto_tree_height_ratio", "auto_void_bead_ratio",
+    "min_bead_diameter_mm", "min_bead_to_nozzle_ratio", "nozzle_diameter_mm",
+])
+@pytest.mark.parametrize("value", [0.0, -0.1, float("nan"), float("inf")])
+def test_invalid_auto_size_limits_fail_before_geometry(
+    tuning_inputs, geometry_spies, field, value,
+):
+    model, gen, contact = tuning_inputs
+    with pytest.raises(InvalidParameterError, match="유한한 양수"):
+        autotune.auto_tune_bead_diameter(model, replace(gen, **{field: value}), contact)
+    assert geometry_spies["slice"].call_count == 0
+    assert geometry_spies["detect"].call_count == 0
+    assert geometry_spies["build"].call_count == 0
 
 
 @pytest.mark.parametrize("steps", [3, 8, 20])

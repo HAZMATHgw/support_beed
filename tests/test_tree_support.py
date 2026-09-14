@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from examples.compare_tree_support import bead_metrics, make_model, mesh_clearance_metrics
 from pellet_support.meshing import BeadPlan
-from pellet_support.params import SupportGenParams
+from pellet_support.params import SupportBeadRegion, SupportGenParams
 from pellet_support.pipeline import generate_support, make_params
 from pellet_support.skeleton import (
     ContactPoint,
@@ -25,6 +25,23 @@ from pellet_support.skeleton import (
     grow_branches,
     skeleton_to_bead_seeds,
 )
+
+
+def _assert_only_intended_contact_embedding(result, model, contact, body):
+    beads = [bead for layer in result.plan.layers for bead in layer["beads"]]
+    xyz = np.array([(b["x"], b["y"], b["z_exact"]) for b in beads])
+    radii = np.array([b["d"] * 0.5 for b in beads])
+    closest, distance, faces = model.nearest.on_surface(xyz)
+    penetration = radii - distance
+    embedded = penetration > 1e-7
+    intended = np.array([b["region"] == SupportBeadRegion.CONTACT for b in beads])
+    assert np.all(~embedded | intended)
+    assert np.all(model.face_normals[faces[embedded], 2] <= -0.3)
+    assert np.all(closest[embedded, 2] > xyz[embedded, 2])
+    maximum = min(contact.lattice_overlap_ratio * contact.bead_diameter_mm,
+                  0.25 * body.bead_diameter_mm)
+    assert np.all(penetration <= maximum + 1e-7)
+    assert np.all(model.nearest.signed_distance(xyz) <= 1e-7)
 
 
 @pytest.mark.parametrize("region", [
@@ -117,11 +134,7 @@ def test_tree_pipeline_is_sparse_unique_and_bed_connected(name):
     assert tree_metrics["duplicate_centres"] == 0
     assert tree_metrics["floating_beads"] == 0
     clearance = mesh_clearance_metrics(tree.plan, gen.layer_height_mm, model)
-    # Contact beads are meant to press slightly into the overhang surface
-    # (an attached joint, not a floating gap) — bounded by a shallow embed,
-    # not a real collision, so cap the depth instead of requiring zero hits.
-    max_embed = contact.lattice_overlap_ratio * contact.bead_diameter_mm
-    assert clearance["max_penetration_mm"] <= max_embed * 2.0 + 0.02
+    _assert_only_intended_contact_embedding(tree, model, contact, body)
     # Patch-22 intentionally presses root spheres slightly into the bed.
     assert clearance["centres_below_bed"] == 0
     assert len(tree.mesh.faces) > 0
@@ -129,8 +142,9 @@ def test_tree_pipeline_is_sparse_unique_and_bed_connected(name):
 
 
 @pytest.mark.parametrize("name", ["bridge", "table"])
-def test_point_four_mm_nozzle_keeps_connected_collision_free_support(name):
-    contact, body = make_params(nozzle_diameter_mm=0.4)
+@pytest.mark.parametrize("body_ratio", [0.97, 1.0], ids=["smaller-body", "uniform"])
+def test_point_four_mm_nozzle_keeps_connected_collision_free_support(name, body_ratio):
+    contact, body = make_params(nozzle_diameter_mm=0.4, body_bead_ratio=body_ratio)
     gen = SupportGenParams(nozzle_diameter_mm=0.4, tree_enabled=True,
                            layer_height_mm=contact.layer_height_mm(),
                            detection_layer_height_mm=0.25, xy_clearance_mm=0.3,
@@ -142,5 +156,8 @@ def test_point_four_mm_nozzle_keeps_connected_collision_free_support(name):
     assert metrics["duplicate_centres"] == 0
     assert metrics["floating_beads"] == 0
     clearance = mesh_clearance_metrics(tree.plan, gen.layer_height_mm, model)
-    assert clearance["penetrating_beads"] == 0
+    _assert_only_intended_contact_embedding(tree, model, contact, body)
+    assert tree.plan.tree_stats["attached_contacts"] == tree.plan.tree_stats["requested_contacts"]
+    if body_ratio == 1.0:
+        assert {b["d"] for layer in tree.plan.layers for b in layer["beads"]} == {0.2}
     assert clearance["centres_below_bed"] == 0

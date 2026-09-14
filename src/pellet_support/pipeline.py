@@ -194,7 +194,8 @@ def _generate_tree_support(
     # 쪽으로 완화해서, 잘 알려진 트리 서포터처럼 더 매끈하고 짧은 경로로
     # 다듬는다(충돌 여유를 다시 확인하면서).
     report_progress("가지 경로 다듬기")
-    smooth_branches(skeleton, det_slices, heights, gen.xy_clearance_mm)
+    smooth_branches(skeleton, det_slices, heights, gen.xy_clearance_mm,
+                    max_branch_angle_deg=gen.branch_angle_deg)
     if verbose:
         print(f"      골격: {skeleton.summary()}, 루트 {len(skeleton.roots())}개")
     skipped = skeleton.skipped_contacts + skeleton.blocked_contacts
@@ -256,29 +257,20 @@ def _generate_tree_support(
     from .printability import close_ceiling_gaps, dedupe_seeds, prune_disconnected_fill
     report_progress("천장 틈 보정")
     contact_nodes = [n for n in skeleton.nodes if n.kind == "contact"]
-    # 보통은 n.z + z_off 가 원래 감지된 오버행 높이(cp.z)를 그대로 복원한다
-    # (grow_branches 가 cz = cp.z - z_off 로 놓았으므로). 하지만 접점이 갈 곳이
-    # 없어 베드에 바로 내려앉은 경우(on_bed=True인 contact 노드) n.z 는 원래
-    # 높이를 잃은 베드 높이라, n.z + z_off 는 실제 천장과 아무 관련이 없는
-    # 값이 된다 — 그러면 광선이 찾은 진짜 표면이 이 값과 3*지름 넘게
-    # 벌어져 있다고 보고 보정을 포기해, 베드에 붙은 외딴 구슬 하나만 남는다.
-    # 원래 감지된 접점(contacts)에서 같은 위치의 진짜 높이를 다시 찾아 쓴다.
-    from scipy.spatial import cKDTree as _CKDTree
-    contact_xy = _CKDTree([(c.x, c.y) for c in contacts])
-    ceiling_targets = []
-    for n in contact_nodes:
-        if n.on_bed:
-            _, near = contact_xy.query([n.x, n.y])
-            expected_z = contacts[near].z
-        else:
-            expected_z = n.z + z_off
-        ceiling_targets.append((n.x, n.y, expected_z))
-    seeds, ceiling_filled, resolved_tops = close_ceiling_gaps(
+    # Preserve the original detection height for bed-clamped contacts. Their
+    # node height no longer encodes the original ceiling through z_off.
+    ceiling_targets = [(n.x, n.y, n.contact_height if n.contact_height is not None
+                        else n.z + z_off) for n in contact_nodes]
+    attached, resolved_positions = [], []
+    seeds, ceiling_filled, _ = close_ceiling_gaps(
         seeds, mesh, ceiling_targets, body_params.bead_diameter_mm,
         gen.xy_clearance_mm, embed=embed, max_beads=limit,
+        contact_origins=[(n.x, n.y, n.z) for n in contact_nodes],
+        contact_status=attached, contact_positions=resolved_positions,
+        progress_callback=progress_callback,
     )
-    tip_nodes = [(n.x, n.y, resolved if resolved is not None else n.z)
-                for n, resolved in zip(contact_nodes, resolved_tops)]
+    tip_nodes = [resolved if resolved is not None else (n.x, n.y, n.z)
+                 for n, resolved in zip(contact_nodes, resolved_positions)]
 
     # 여러 단계(트렁크 최밀충전, 가새, 아래 받침 보완, 천장 틈 보정)가 서로
     # 무엇을 이미 놓았는지 모르고 각자 구슬을 놓다 보니, 같은 자리에 겹쳐
@@ -294,6 +286,7 @@ def _generate_tree_support(
     # 접점) 근처의 엉뚱한 비드 옆에 보정 비드를 놓고 만다 — 그 결과가
     # 베드에도 모델에도 안 이어진 진짜 허공의 비드일 수 있다. 마지막으로
     # 한 번 더 확인해 그런 경우만 걸러낸다.
+    report_progress("떠 있는 구슬 정리")
     seeds, floating_after_cleanup = prune_floating(
         seeds, None if gen.support_on_build_plate_only else mesh, z0, gen.xy_clearance_mm)
     unsupported += floating_after_cleanup
@@ -307,20 +300,27 @@ def _generate_tree_support(
     # 오인한다.
     from scipy.spatial import cKDTree
     supported = 0
+    attached_count = 0
     if tip_nodes and seeds:
         distances, _ = cKDTree([seed[:3] for seed in seeds]).query(tip_nodes)
-        supported = int((distances <= contact_params.bead_diameter_mm * 0.6).sum())
+        retained = distances <= contact_params.bead_diameter_mm * 0.6
+        supported = int(retained.sum())
+        # Report only contacts whose corrected sphere survives final cleanup.
+        attached_count = sum(bool(ok and present) for ok, present in zip(attached, retained))
     plan.tree_stats = dict(requested_contacts=len(contacts), supported_contacts=supported,
                            roots=len(skeleton.roots()), contact_spacing_mm=spacing,
                            repaired_beads=repaired, removed_unsupported_beads=unsupported,
                            ceiling_gap_beads=ceiling_filled, deduped_beads=deduped,
-                           pruned_fill_beads=pruned_fill)
+                           pruned_fill_beads=pruned_fill, attached_contacts=attached_count)
     if supported < len(contacts):
         warnings.warn(f"선택한 접점 {len(contacts)}개 중 {len(contacts) - supported}개는 "
                       "최종 비드에 연결되지 않았습니다. 지지 누락을 확인하세요.", stacklevel=2)
+    if attached_count < supported:
+        warnings.warn(f"유지된 접점 {supported}개 중 실제 천장에 연결된 접점은 "
+                      f"{attached_count}개입니다. 미리보기에서 지지 누락을 확인하세요.",
+                      stacklevel=2)
     bead_h = gen.layer_height_mm
-    contact_centres = {(round(n.x, 7), round(n.y, 7), round(n.z, 7))
-                       for n in skeleton.nodes if n.kind == "contact"}
+    contact_centres = {tuple(round(v, 7) for v in point) for point in tip_nodes}
     by_layer: Dict[int, list] = {}
     for x, y, z, d in seeds:
         li = max(0, int((z - z0) / bead_h))

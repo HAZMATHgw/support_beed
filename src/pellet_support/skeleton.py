@@ -47,6 +47,8 @@ class SupportNode:
     on_bed: bool = False
     #: 베드까지 못 가고 모델 윗면에 내려앉았다.
     on_model: bool = False
+    #: 원래 오버행 접점 높이. 베드에 맞춰 중심을 옮겨도 천장 목표를 보존한다.
+    contact_height: Optional[float] = None
 
     @property
     def xy(self) -> Tuple[float, float]:
@@ -457,7 +459,9 @@ def grow_branches(
         root.on_bed = on_bed
         root.on_model = not on_bed
 
-    max_iter = int(math.ceil((z - z_end) / (0.25 * step_h))) + 10
+    # A shallow contact may start below the bed after its search offset. Still
+    # enter the loop so the near-bed fallback can keep or explicitly reject it.
+    max_iter = int(math.ceil(max(0.0, z - z_end) / (0.25 * step_h))) + 10
     for _ in range(max_iter):
         nz = max(z_end, z - step_h)
         # 이번 단계 사이(nz, z]에 시작하는 접촉점을 제 높이에 추가한다.
@@ -502,6 +506,7 @@ def grow_branches(
                     px, py = free_spot
             node = skeleton.add_node(px, py, cz, None, bed_radius, cp.layer,
                                      kind="contact")
+            skeleton.nodes[node].contact_height = cp.z
             active.append({"node": node, "x": px, "y": py, "z": cz,
                            "load": 1, "ztop": cp.z})
         if nz <= z_end + 1e-9:
@@ -519,6 +524,7 @@ def grow_branches(
                     node = skeleton.add_node(cp.x, cp.y, z_end, None, bed_radius,
                                              cp.layer, kind="contact")
                     skeleton.nodes[node].on_bed = True
+                    skeleton.nodes[node].contact_height = cp.z
                 else:
                     skeleton.skipped_contacts += 1
                     skeleton.dropped_points.append((cp.x, cp.y, cp.z))
@@ -621,6 +627,7 @@ def smooth_branches(
     xy_clearance: float,
     iterations: int = 4,
     relax: float = 0.5,
+    max_branch_angle_deg: float = 25.0,
 ) -> SupportSkeleton:
     """가지 경로의 지그재그를 풀어 매끈하고 짧은 곡선에 가깝게 만든다.
 
@@ -629,18 +636,26 @@ def smooth_branches(
     이걸로 충분하지만, 매 단계 다른 방향으로 꺾이다 보니 경로 자체는
     들쭉날쭉하다. 잘 알려진 트리 서포터 구현(Cura/PrusaSlicer 계열)은
     이런 병합 이후에 경로를 매끈하고 더 짧게 다듬는다 — 위상은 그대로 두고
-    각 마디를 부모/자식의 중점 쪽으로 완화해서 같은 효과를 낸다.
+    각 마디를 부모와 자식을 잇는 직선 쪽으로 완화해서 같은 효과를 낸다.
 
     병합점(자식이 2개 이상)과 리프(접점), 뿌리(부모 없음), 모델 위에
     내려앉은 지점은 그 자리 자체가 의미 있는 위치라 건드리지 않는다.
     자식이 정확히 하나뿐인 '통과' 마디만, 매번 옮긴 자리가 부모/자식
-    양쪽 구간에서 여전히 충돌 없는 경우에만 옮긴다.
+    양쪽 구간에서 여전히 충돌 없고 지정된 기울기 이내인 경우에만 옮긴다.
+    마디 간 높이가 달라도 각도를 유지하도록 같은 높이의 직선 경로 쪽으로
+    완화한다.
     """
+    if not math.isfinite(relax) or not 0.0 <= relax <= 1.0:
+        raise ValueError("relax must be finite and between 0 and 1")
+    if (not math.isfinite(max_branch_angle_deg)
+            or not 0.0 <= max_branch_angle_deg < 90.0):
+        raise ValueError("max_branch_angle_deg must be finite and in [0, 90)")
     if not skeleton.nodes:
         return skeleton
     from .tree_collision import SliceCollision
 
     collision = SliceCollision(model_slices, heights, xy_clearance)
+    tan_a = math.tan(math.radians(max_branch_angle_deg))
     for _ in range(max(0, iterations)):
         moved = 0
         for idx, node in enumerate(skeleton.nodes):
@@ -650,11 +665,19 @@ def smooth_branches(
                 continue
             parent = skeleton.nodes[node.parent]
             child = skeleton.nodes[skeleton.children[idx][0]]
-            target_x = 0.5 * (parent.x + child.x)
-            target_y = 0.5 * (parent.y + child.y)
+            below = node.z - parent.z
+            above = child.z - node.z
+            if below <= 1e-9 or above <= 1e-9:
+                continue
+            fraction = below / (below + above)
+            target_x = parent.x + fraction * (child.x - parent.x)
+            target_y = parent.y + fraction * (child.y - parent.y)
             nx = node.x + relax * (target_x - node.x)
             ny = node.y + relax * (target_y - node.y)
             if abs(nx - node.x) < 1e-9 and abs(ny - node.y) < 1e-9:
+                continue
+            if (math.hypot(nx - parent.x, ny - parent.y) > below * tan_a + 1e-9
+                    or math.hypot(child.x - nx, child.y - ny) > above * tan_a + 1e-9):
                 continue
             if not collision.edge_clear((parent.x, parent.y, parent.z), (nx, ny, node.z),
                                         parent.radius, node.radius):
