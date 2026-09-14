@@ -209,6 +209,7 @@ def _generate_tree_support(
             skeleton, contact_params.bead_diameter_mm, body_params.bead_diameter_mm,
             max_trunk_diameter_mm=gen.tree_max_trunk_diameter_mm,
             slenderness=gen.tree_trunk_slenderness,
+            tip_diameter_mm=body_params.bead_diameter_mm * gen.tree_tip_diameter_ratio,
         )
     report_progress("트리 구슬 배치")
     seeds = skeleton_to_bead_seeds(

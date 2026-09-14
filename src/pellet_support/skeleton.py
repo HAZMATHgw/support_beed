@@ -975,16 +975,23 @@ def assign_hierarchical_radii(
     body_diameter_mm: float,
     max_trunk_diameter_mm: Optional[float] = None,
     slenderness: float = 8.0,
+    tip_diameter_mm: Optional[float] = None,
 ) -> None:
     """노드마다 **트렁크 단면 반경**을 매긴다(요구사항 10 + 좌우 흔들림).
 
-    두 조건 중 큰 쪽을 쓴다.
+    세 조건 중 큰 쪽을 쓴다.
 
     1. 짐: 떠받치는 접촉점 수의 제곱근에 비례(단면적 ∝ 짐).
     2. 세장비: 이 노드 위로 서 있는 높이 / ``slenderness``. 위에서 아래로
        갈수록 굵어지는 원추형이 된다. 휨 모멘트가 가장 큰 곳이 밑동이라
        밑동이 가장 굵어야 한다 — 예전 구현은 높이 96mm 트렁크의 밑동이
        구슬 1개(3.6mm, 세장비 26)였다.
+    3. 팁 최소 굵기: 위 두 조건은 접점 바로 아래에서 ``body_diameter_mm``
+       (구슬 하나 폭)까지 떨어진다 — 세장비를 아무리 낮춰도 접점 바로
+       아래 마지막 몇 mm는 항상 외줄이 된다(2번 항이 접점에서 0으로
+       수렴하므로). ``tip_diameter_mm`` 을 주면 그 구간에도 최소 굵기를
+       강제해 외줄 구간을 없앤다. 세장비보다 낮은 구간에서만 이기므로
+       밑동 굵기에는 영향이 없다(밑동은 이미 이보다 굵음).
 
     ``radius`` 는 이제 구슬 크기가 아니라 '이 높이에서 트렁크 원판의 반경'
     이다. 구슬은 항상 몸통 지름이고, 굵기는 원판 안의 구슬 개수로 낸다.
@@ -994,6 +1001,8 @@ def assign_hierarchical_radii(
         return
     if max_trunk_diameter_mm is None:
         max_trunk_diameter_mm = body_diameter_mm * 15.0
+    if tip_diameter_mm is None:
+        tip_diameter_mm = body_diameter_mm
 
     load = [0] * n
     ztop = [skeleton.nodes[i].z for i in range(n)]
@@ -1031,7 +1040,7 @@ def assign_hierarchical_radii(
             continue
         d_load = body_diameter_mm * math.sqrt(max(1, load[i])) * 0.5
         d_slender = (ztop[i] - node.z) / max(slenderness, 1e-6)
-        d = max(body_diameter_mm, d_load, d_slender)
+        d = max(body_diameter_mm, d_load, d_slender, tip_diameter_mm)
         node.radius = 0.5 * min(d, max_trunk_diameter_mm)
 
 

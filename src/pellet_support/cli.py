@@ -120,6 +120,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="트리 모드 트렁크 세장비 상한(높이/굵기). 트렁크가 아래로 "
                         "갈수록 이 비율로 굵어지는 구슬 다발이 된다. 작을수록 튼튼하고 "
                         "구슬이 많이 든다(기본 8)")
+    s.add_argument("--tip-diameter-ratio", type=float, default=1.0,
+                   help="접점 바로 아래 트렁크의 최소 굵기(몸통 구슬 지름의 배수, "
+                        "기본 1.0=끔). 세장비는 접점에서 0으로 수렴해 세장비를 아무리 "
+                        "낮춰도 접점 바로 아래는 항상 외줄로 남는데, 1.0보다 크게 주면 "
+                        "그 구간도 최소 굵기를 갖는다. 밑동 굵기는 그대로다.")
     s.add_argument("--no-bracing", action="store_true",
                    help="트리 모드에서 이웃 트렁크끼리 베드 연결 + X 가새로 잇지 않는다")
     s.add_argument("--brace-distance", type=float, default=None,
@@ -247,6 +252,7 @@ def _run(argv=None) -> int:
         branch_angle_deg=args.branch_angle,
         branch_merge_distance_mm=args.branch_merge_distance,
         tree_trunk_slenderness=args.trunk_slenderness,
+        tree_tip_diameter_ratio=args.tip_diameter_ratio,
         tree_bracing=not args.no_bracing,
         tree_brace_distance_mm=args.brace_distance,
         fallback_solid=not args.no_fallback_solid,
