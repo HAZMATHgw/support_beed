@@ -492,7 +492,16 @@ def grow_branches(
         root.on_bed = on_bed
         root.on_model = not on_bed
 
-    max_iter = int(math.ceil((z - z_end) / (0.25 * step_h))) + 10
+    # A contact whose own offset already pushes the starting height below
+    # z_end (every contact in the batch shallower than contact_z_offset --
+    # normally rare since a batch is the whole model's contacts and some
+    # are tall, but a batch consisting only of shallow leftovers, as when
+    # retrying with a smaller fallback bead, hits this every time) makes
+    # (z - z_end) negative, and with it max_iter -- range() with a negative
+    # stop just never runs, so the loop body (including the z_end
+    # fallback placement below, which is exactly what these contacts need)
+    # never executes at all: not even far enough to count them as skipped.
+    max_iter = max(1, int(math.ceil((z - z_end) / (0.25 * step_h))) + 10)
     for _ in range(max_iter):
         nz = max(z_end, z - step_h)
         # 이번 단계 사이(nz, z]에 시작하는 접촉점을 제 높이에 추가한다.

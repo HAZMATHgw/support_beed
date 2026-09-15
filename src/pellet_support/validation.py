@@ -152,6 +152,13 @@ def validate_gen_params(gen: SupportGenParams) -> None:
         f"1.0 이상이어야 합니다(1.0 = 기본 동작, 그대로 둠).",
     )
     _require(
+        gen.tree_fallback_bead_diameter_mm is None or
+        (math.isfinite(gen.tree_fallback_bead_diameter_mm)
+         and gen.tree_fallback_bead_diameter_mm > 0),
+        f"보완 구슬 지름이 {gen.tree_fallback_bead_diameter_mm}mm 입니다. "
+        f"0보다 커야 합니다(비우면 끔).",
+    )
+    _require(
         gen.tree_brace_distance_mm is None or
         (math.isfinite(gen.tree_brace_distance_mm) and gen.tree_brace_distance_mm > 0),
         f"트렁크 연결 최대 거리가 {gen.tree_brace_distance_mm}mm 입니다. "

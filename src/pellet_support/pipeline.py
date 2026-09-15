@@ -180,107 +180,165 @@ def _generate_tree_support(
         return SupportResult(trimesh.Trimesh(), None, det_slices)
 
     # 높이는 단면 중앙이므로, 실제 아랫면은 반 탐지층 아래에 있다.
+    #
+    # 한 번의 성장+구슬화 과정을 하나의 구슬 지름으로 실행한다. 기본
+    # 지름으로 시도하고, 자리가 안 나오는 접점은 (호출자가) 더 작은
+    # 지름으로 이 함수를 다시 불러 보완한다 -- 한 가지 안에서는 구슬
+    # 크기가 균일하고, 서로 다른 가지가 서로 다른 굵기를 쓰게 된다.
+    def _grow_one_size(pass_contacts, contact_p, body_p, label):
+        embed_p = contact_p.lattice_overlap_ratio * contact_p.bead_diameter_mm
+        # ``gap`` (밖에서 온 값) 은 기본 구슬의 층높이(pitch)로 정해진
+        # 최소 Z 간격이다 -- 다른(특히 훨씬 작은) 구슬 지름으로 이 함수를
+        # 다시 부를 때 그대로 재사용하면, 기본 구슬 기준 층높이(예:
+        # 2.25mm)가 보완 구슬이 채워야 할 실제 틈(예: 0.6mm)보다 커져서
+        # 시작 높이가 베드 훨씬 아래로 잡히고 성장 루프가 반복 횟수 음수로
+        # 완전히 건너뛰어진다(스킵으로 집계조차 안 되고 조용히 사라짐).
+        # 이 패스 자신의 구슬 지름에 맞는 층높이로 다시 계산한다.
+        gap_p = max(gen.contact_z_gap_mm,
+                   gen.contact_z_gap_layers * contact_p.layer_height_mm())
+        z_off_p = 0.5 * contact_p.bead_diameter_mm + gap_p + 0.5 * det_h
+        skel = grow_branches(
+            pass_contacts, det_slices, heights, replace(gen, max_beads=limit),
+            step_h=max(det_h * 3, contact_p.bead_diameter_mm * 0.5),
+            merge_distance=gen.branch_merge_distance_mm or contact_p.bead_diameter_mm * 6,
+            max_branch_angle_deg=gen.branch_angle_deg,
+            contact_z_offset=z_off_p,
+            bead_radius=0.5 * max(contact_p.bead_diameter_mm, body_p.bead_diameter_mm),
+        )
+        # 매 성장 단계가 그 순간의 끌림 대상 쪽으로만 꺾이다 보니 트렁크가
+        # 지그재그로 남는다. 위상은 그대로 두고 통과 마디만 부모/자식 중점
+        # 쪽으로 완화해서, 잘 알려진 트리 서포터처럼 더 매끈하고 짧은 경로로
+        # 다듬는다(충돌 여유를 다시 확인하면서).
+        smooth_branches(skel, det_slices, heights, gen.xy_clearance_mm)
+        if verbose:
+            print(f"      {label} 골격: {skel.summary()}, 루트 {len(skel.roots())}개")
+        # patch-22의 구조 보강을 유지한다. 가는 사슬로 바꾸는 대신, 접점과
+        # 나무 수를 줄인 뒤 하중/세장비에 맞는 구슬 다발과 가새를 만든다.
+        if gen.adaptive_bead_size:
+            assign_hierarchical_radii(
+                skel, contact_p.bead_diameter_mm, body_p.bead_diameter_mm,
+                max_trunk_diameter_mm=gen.tree_max_trunk_diameter_mm,
+                slenderness=gen.tree_trunk_slenderness,
+                tip_diameter_mm=body_p.bead_diameter_mm * gen.tree_tip_diameter_ratio,
+            )
+        pass_seeds = skeleton_to_bead_seeds(
+            skel, contact_p.bead_diameter_mm, body_p.bead_diameter_mm,
+            model_slices=det_slices, heights=heights, xy_clearance=gen.xy_clearance_mm,
+            max_branch_angle_deg=gen.branch_angle_deg,
+            include_on_model=not gen.support_on_build_plate_only,
+        )
+        if gen.tree_bracing:
+            braces, _, _ = add_bracing(
+                skel, body_p.bead_diameter_mm, det_slices, heights,
+                gen.xy_clearance_mm, max_distance_mm=gen.tree_brace_distance_mm,
+                brace_angle_deg=min(35.0, gen.overhang_angle_deg),
+            )
+            pass_seeds += braces
+        guard_bead_count(len(pass_seeds), limit)
+        pass_seeds, _ = settle_collisions(pass_seeds, mesh, gen.xy_clearance_mm,
+                                          z_gap=gen.contact_z_gap_mm,
+                                          model_slices=det_slices, heights=heights)
+        from .printability import repair_support_paths
+        pass_seeds, pass_repaired = repair_support_paths(
+            pass_seeds, mesh, z0, body_p.bead_diameter_mm, gen.xy_clearance_mm,
+            z_gap=gen.contact_z_gap_mm, max_beads=limit,
+            allow_model=not gen.support_on_build_plate_only,
+            progress_callback=progress_callback,
+        )
+        pass_seeds, pass_unsupported = prune_floating(
+            pass_seeds, None if gen.support_on_build_plate_only else mesh, z0,
+            gen.xy_clearance_mm)
+        pass_tip_nodes: list = []
+        pass_ceiling_filled = 0
+        pass_contact_nodes = [n for n in skel.nodes if n.kind == "contact"]
+        if pass_seeds and pass_contact_nodes:
+            # 접점 간격을 넓게 잡을수록(구슬 수를 줄이려고) 접점 하나가
+            # 대표하는 대표 높이 하나로는 그 접점이 실제로 내려앉은 XY
+            # 위치의 진짜 천장 높이를 못 맞힐 때가 있다. 그러면 가지 끝이
+            # 실제 표면보다 한참 아래서 멈춰 눈에 띄는 틈이 남는다. 여기서
+            # 각 리프 위로 실제 표면을 다시 찾아, 모자란 만큼만 구슬을 더
+            # 쌓아 잇는다.
+            from .printability import close_ceiling_gaps
+            from scipy.spatial import cKDTree as _CKDTree
+            contact_xy = _CKDTree([(c.x, c.y) for c in pass_contacts])
+            ceiling_targets = []
+            for n in pass_contact_nodes:
+                if n.on_bed:
+                    # 접점이 갈 곳이 없어 베드에 바로 내려앉은 경우(n.on_bed)
+                    # n.z 는 원래 높이를 잃은 베드 높이라, n.z + z_off_p 는
+                    # 실제 천장과 무관하다. 원래 감지된 접점에서 같은 위치의
+                    # 진짜 높이를 다시 찾아 쓴다.
+                    _, near = contact_xy.query([n.x, n.y])
+                    expected_z = pass_contacts[near].z
+                else:
+                    expected_z = n.z + z_off_p
+                ceiling_targets.append((n.x, n.y, expected_z))
+            pass_spacing = gen.tree_contact_spacing_mm or contact_p.bead_diameter_mm * 4.0
+            pass_seeds, pass_ceiling_filled, resolved_tops = close_ceiling_gaps(
+                pass_seeds, mesh, ceiling_targets, body_p.bead_diameter_mm,
+                gen.xy_clearance_mm, embed=embed_p, max_beads=limit, bed_z=z0,
+                search_radius_mm=pass_spacing,
+            )
+            pass_tip_nodes = [(n.x, n.y, resolved if resolved is not None else n.z)
+                             for n, resolved in zip(pass_contact_nodes, resolved_tops)]
+        return (pass_seeds, skel, pass_contact_nodes, pass_tip_nodes, pass_repaired,
+               pass_unsupported, pass_ceiling_filled)
+
     report_progress("트리 가지 성장·병합")
-    skeleton = grow_branches(
-        contacts, det_slices, heights, replace(gen, max_beads=limit),
-        step_h=max(det_h * 3, contact_params.bead_diameter_mm * 0.5),
-        merge_distance=gen.branch_merge_distance_mm or contact_params.bead_diameter_mm * 6,
-        max_branch_angle_deg=gen.branch_angle_deg,
-        contact_z_offset=z_off,
-        bead_radius=0.5 * max(contact_params.bead_diameter_mm, body_params.bead_diameter_mm),
-    )
-    # 매 성장 단계가 그 순간의 끌림 대상 쪽으로만 꺾이다 보니 트렁크가
-    # 지그재그로 남는다. 위상은 그대로 두고 통과 마디만 부모/자식 중점
-    # 쪽으로 완화해서, 잘 알려진 트리 서포터처럼 더 매끈하고 짧은 경로로
-    # 다듬는다(충돌 여유를 다시 확인하면서).
-    report_progress("가지 경로 다듬기")
-    smooth_branches(skeleton, det_slices, heights, gen.xy_clearance_mm)
-    if verbose:
-        print(f"      골격: {skeleton.summary()}, 루트 {len(skeleton.roots())}개")
+    (seeds, skeleton, contact_nodes, tip_nodes, repaired, unsupported,
+     ceiling_filled) = _grow_one_size(contacts, contact_params, body_params, "기본")
     skipped = skeleton.skipped_contacts + skeleton.blocked_contacts
     if skipped:
         warnings.warn(f"트리 접점 {len(contacts)}개 중 {skipped}개는 지정한 "
                       "구슬/여유로 배치할 수 없습니다. 미리보기에서 확인하세요.", stacklevel=2)
-    # patch-22의 구조 보강을 유지한다. 가는 사슬로 바꾸는 대신, 접점과
-    # 나무 수를 줄인 뒤 하중/세장비에 맞는 구슬 다발과 가새를 만든다.
-    if gen.adaptive_bead_size:
-        report_progress("트렁크 굵기 계산")
-        assign_hierarchical_radii(
-            skeleton, contact_params.bead_diameter_mm, body_params.bead_diameter_mm,
-            max_trunk_diameter_mm=gen.tree_max_trunk_diameter_mm,
-            slenderness=gen.tree_trunk_slenderness,
-            tip_diameter_mm=body_params.bead_diameter_mm * gen.tree_tip_diameter_ratio,
-        )
-    report_progress("트리 구슬 배치")
-    seeds = skeleton_to_bead_seeds(
-        skeleton, contact_params.bead_diameter_mm, body_params.bead_diameter_mm,
-        model_slices=det_slices, heights=heights, xy_clearance=gen.xy_clearance_mm,
-        max_branch_angle_deg=gen.branch_angle_deg,
-        include_on_model=not gen.support_on_build_plate_only,
-    )
-    if gen.tree_bracing:
-        report_progress("트리 가새 보강")
-        braces, _, _ = add_bracing(
-            skeleton, body_params.bead_diameter_mm, det_slices, heights,
-            gen.xy_clearance_mm, max_distance_mm=gen.tree_brace_distance_mm,
-            brace_angle_deg=min(35.0, gen.overhang_angle_deg),
-        )
-        seeds += braces
-    guard_bead_count(len(seeds), limit)
-    report_progress("모델 충돌 보정")
-    seeds, _ = settle_collisions(seeds, mesh, gen.xy_clearance_mm,
-                                z_gap=gen.contact_z_gap_mm,
-                                model_slices=det_slices, heights=heights)
-    from .printability import repair_support_paths
-    report_progress("아래 받침 연결 보완")
-    seeds, repaired = repair_support_paths(
-        seeds, mesh, z0, body_params.bead_diameter_mm, gen.xy_clearance_mm,
-        z_gap=gen.contact_z_gap_mm, max_beads=limit,
-        allow_model=not gen.support_on_build_plate_only,
-        progress_callback=progress_callback,
-    )
-    report_progress("떠 있는 구슬 정리")
-    seeds, unsupported = prune_floating(
-        seeds, None if gen.support_on_build_plate_only else mesh, z0, gen.xy_clearance_mm)
+    extra_roots = 0
+
+    # 기본 구슬로는 수직 틈이 안 나와 통째로 빠진 접점(dropped_points)을,
+    # 더 작은 구슬로 다시 시도한다. 여기서만 통과 못 한 접점이라 진짜
+    # 물리적 한계(예: 오버행이 베드에서 0.6mm 인데 3mm 구슬은 1.2mm 틈이
+    # 필요)인 경우가 대부분 -- 옆으로 막힌 접점은 어느 크기든 그 자리에서
+    # 막히므로 여기서 다시 시도해도 소용없어 그대로 둔다.
+    if gen.tree_fallback_bead_diameter_mm and skeleton.dropped_points and \
+            gen.tree_fallback_bead_diameter_mm < contact_params.bead_diameter_mm:
+        report_progress("작은 구슬로 보완")
+        from .skeleton import ContactPoint
+        scale = gen.tree_fallback_bead_diameter_mm / contact_params.bead_diameter_mm
+        contact_fb = replace(contact_params, bead_diameter_mm=gen.tree_fallback_bead_diameter_mm)
+        body_fb = replace(body_params, bead_diameter_mm=body_params.bead_diameter_mm * scale)
+
+        def _layer_of(z):
+            return max(0, min(len(heights) - 1, int(round((z - heights[0]) / det_h))))
+
+        fallback_contacts = [ContactPoint(x, y, z, _layer_of(z), 1.0)
+                             for x, y, z in skeleton.dropped_points]
+        (seeds_fb, skeleton_fb, contact_nodes_fb, tip_nodes_fb, repaired_fb,
+         unsupported_fb, ceiling_filled_fb) = _grow_one_size(
+            fallback_contacts, contact_fb, body_fb, "보완")
+        if verbose:
+            print(f"      보완 구슬(지름 {gen.tree_fallback_bead_diameter_mm}mm) "
+                  f"{len(seeds_fb)}개, 접점 {len(fallback_contacts)}개 중 "
+                  f"{len(fallback_contacts) - skeleton_fb.skipped_contacts - skeleton_fb.blocked_contacts}개 배치")
+        seeds = seeds + seeds_fb
+        contact_nodes = contact_nodes + contact_nodes_fb
+        # ``contacts`` (the requested-count denominator below) already
+        # counts these positions once, as the primary pass's own failed
+        # attempt -- appending fallback_contacts too would count a rescued
+        # contact twice (once as "missing" via the primary's copy with no
+        # tip_node, once as "found" via the fallback's), permanently
+        # reporting it as unconnected even after the fallback succeeds.
+        tip_nodes = tip_nodes + tip_nodes_fb
+        repaired += repaired_fb
+        unsupported += unsupported_fb
+        ceiling_filled += ceiling_filled_fb
+        extra_roots = len(skeleton_fb.roots())
+
+    from .printability import dedupe_seeds, prune_disconnected_fill
     if verbose:
         print(f"      구슬 {len(seeds)}개")
     if not seeds:
         warnings.warn("오버행은 있지만 충돌/연결 조건을 만족하는 트리 비드를 만들지 "
                       "못했습니다. 구슬 크기와 여유를 확인하세요.", stacklevel=2)
         return SupportResult(trimesh.Trimesh(), None, det_slices)
-
-    # 접점 간격을 넓게 잡을수록(구슬 수를 줄이려고) 접점 하나가 대표하는
-    # 대표 높이 하나로는 그 접점이 실제로 내려앉은 XY 위치의 진짜 천장
-    # 높이를 못 맞힐 때가 있다. 그러면 가지 끝이 실제 표면보다 한참 아래서
-    # 멈춰 눈에 띄는 틈이 남는다. 여기서 각 리프 위로 실제 표면을 다시
-    # 광선으로 찾아, 모자란 만큼만 구슬을 더 쌓아 잇는다.
-    from .printability import close_ceiling_gaps, dedupe_seeds, prune_disconnected_fill
-    report_progress("천장 틈 보정")
-    contact_nodes = [n for n in skeleton.nodes if n.kind == "contact"]
-    # 보통은 n.z + z_off 가 원래 감지된 오버행 높이(cp.z)를 그대로 복원한다
-    # (grow_branches 가 cz = cp.z - z_off 로 놓았으므로). 하지만 접점이 갈 곳이
-    # 없어 베드에 바로 내려앉은 경우(on_bed=True인 contact 노드) n.z 는 원래
-    # 높이를 잃은 베드 높이라, n.z + z_off 는 실제 천장과 아무 관련이 없는
-    # 값이 된다 — 그러면 광선이 찾은 진짜 표면이 이 값과 3*지름 넘게
-    # 벌어져 있다고 보고 보정을 포기해, 베드에 붙은 외딴 구슬 하나만 남는다.
-    # 원래 감지된 접점(contacts)에서 같은 위치의 진짜 높이를 다시 찾아 쓴다.
-    from scipy.spatial import cKDTree as _CKDTree
-    contact_xy = _CKDTree([(c.x, c.y) for c in contacts])
-    ceiling_targets = []
-    for n in contact_nodes:
-        if n.on_bed:
-            _, near = contact_xy.query([n.x, n.y])
-            expected_z = contacts[near].z
-        else:
-            expected_z = n.z + z_off
-        ceiling_targets.append((n.x, n.y, expected_z))
-    seeds, ceiling_filled, resolved_tops = close_ceiling_gaps(
-        seeds, mesh, ceiling_targets, body_params.bead_diameter_mm,
-        gen.xy_clearance_mm, embed=embed, max_beads=limit, bed_z=z0,
-        search_radius_mm=spacing,
-    )
-    tip_nodes = [(n.x, n.y, resolved if resolved is not None else n.z)
-                for n, resolved in zip(contact_nodes, resolved_tops)]
 
     # 여러 단계(트렁크 최밀충전, 가새, 아래 받침 보완, 천장 틈 보정)가 서로
     # 무엇을 이미 놓았는지 모르고 각자 구슬을 놓다 보니, 같은 자리에 겹쳐
@@ -313,7 +371,7 @@ def _generate_tree_support(
         distances, _ = cKDTree([seed[:3] for seed in seeds]).query(tip_nodes)
         supported = int((distances <= contact_params.bead_diameter_mm * 0.6).sum())
     plan.tree_stats = dict(requested_contacts=len(contacts), supported_contacts=supported,
-                           roots=len(skeleton.roots()), contact_spacing_mm=spacing,
+                           roots=len(skeleton.roots()) + extra_roots, contact_spacing_mm=spacing,
                            repaired_beads=repaired, removed_unsupported_beads=unsupported,
                            ceiling_gap_beads=ceiling_filled, deduped_beads=deduped,
                            pruned_fill_beads=pruned_fill)
@@ -322,7 +380,7 @@ def _generate_tree_support(
                       "최종 비드에 연결되지 않았습니다. 지지 누락을 확인하세요.", stacklevel=2)
     bead_h = gen.layer_height_mm
     contact_centres = {(round(n.x, 7), round(n.y, 7), round(n.z, 7))
-                       for n in skeleton.nodes if n.kind == "contact"}
+                       for n in contact_nodes}
     by_layer: Dict[int, list] = {}
     for x, y, z, d in seeds:
         li = max(0, int((z - z0) / bead_h))

@@ -126,6 +126,10 @@ def build_parser() -> argparse.ArgumentParser:
                         "기본 1.0=끔). 세장비는 접점에서 0으로 수렴해 세장비를 아무리 "
                         "낮춰도 접점 바로 아래는 항상 외줄로 남는데, 1.0보다 크게 주면 "
                         "그 구간도 최소 굵기를 갖는다. 밑동 굵기는 그대로다.")
+    s.add_argument("--fallback-bead-diameter", type=float, default=None,
+                   help="기본 구슬로는 수직 틈이 안 나오는 접점을 이 더 작은 지름(mm)으로 "
+                        "다시 시도한다(기본: 끔). 한 가지 안에서는 여전히 구슬 크기가 "
+                        "균일하고, 이 보완 구슬만 쓰는 가지가 따로 자란다.")
     s.add_argument("--no-bracing", action="store_true",
                    help="트리 모드에서 이웃 트렁크끼리 베드 연결 + X 가새로 잇지 않는다")
     s.add_argument("--brace-distance", type=float, default=None,
@@ -260,6 +264,7 @@ def _run(argv=None) -> int:
         branch_merge_distance_mm=args.branch_merge_distance,
         tree_trunk_slenderness=args.trunk_slenderness,
         tree_tip_diameter_ratio=args.tip_diameter_ratio,
+        tree_fallback_bead_diameter_mm=args.fallback_bead_diameter,
         tree_bracing=not args.no_bracing,
         tree_brace_distance_mm=args.brace_distance,
         fallback_solid=not args.no_fallback_solid,
