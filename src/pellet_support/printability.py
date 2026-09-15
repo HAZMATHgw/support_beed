@@ -309,7 +309,7 @@ def _climb_to_reachable_ceiling(pq, mesh, start, expected_z, bead_diameter,
 
 
 def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
-                       embed=0.0, max_beads=None, bed_z=0.0):
+                       embed=0.0, max_beads=None, bed_z=0.0, search_radius_mm=None):
     """Stack beads up to the real overhang surface under each leaf contact.
 
     A tree contact's height comes from one representative overhang sample,
@@ -317,6 +317,13 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
     less likely to match the true local ceiling height at the exact XY where
     the branch actually lands. The result is a leaf that stops short of the
     surface it is meant to hold up, sometimes by several millimetres.
+
+    ``search_radius_mm``, when given, is the tree's contact spacing; the
+    search net for a contact's own bead near its sampled (x, y) is widened
+    to twice that when larger than the bead-diameter-based default, so it
+    doesn't come up empty when several closely-sampled contacts merged into
+    one shared trunk whose tip legitimately sits a couple of contact-
+    spacings from any single one of them.
 
     The support must actually touch the model to hold it up, so the fix
     lands the final bead ``embed`` into the surface (the same idea as
@@ -354,6 +361,20 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
     tree = cKDTree(beads[:, :2])
     radius = 0.5 * bead_diameter
     step = 0.88 * bead_diameter
+    # How far this contact's own bead can end up from its sampled (x, y):
+    # normally just the branch's own local wobble (a couple of bead
+    # diameters), but several contacts sampled close together (a dense,
+    # tightly spaced overhang edge) can merge into one shared trunk whose
+    # single resulting tip sits several *contact spacings* away from any one
+    # of them -- a real, intended merge, not a miss. A net sized only off
+    # bead diameter can be far smaller than that gap on a fine-bead model,
+    # finding no candidate at all and leaving the contact looking dropped.
+    nearby_radius = bead_diameter * 2.0
+    if search_radius_mm is not None:
+        # Observed worst case (a fine-bead model with several contacts only
+        # a bit over 2mm apart): the merged trunk's tip landed nearly 2x the
+        # contact spacing from one of the merged contacts' own sample point.
+        nearby_radius = max(nearby_radius, 2.0 * search_radius_mm)
     budget = max_beads if max_beads is not None else 2_000_000
     pq = mesh.nearest
     added = []
@@ -379,7 +400,7 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         return all(point_safety[key] for key in keys)
 
     for t_idx, (x, y, expected_z) in enumerate(targets):
-        nearby = tree.query_ball_point([x, y], bead_diameter * 2.0)
+        nearby = tree.query_ball_point([x, y], nearby_radius)
         if not nearby:
             continue
         # A tall, densely routed model can put an unrelated branch's bead at
