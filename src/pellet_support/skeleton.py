@@ -333,6 +333,41 @@ class _SliceField:
         return (not g.is_empty) and bool(shapely.contains_xy(g, x, y))
 
 
+def _nearest_clear_of(poly, x: float, y: float, max_reach: float):
+    """Closest point to ``(x, y)`` outside ``poly``, within ``max_reach``.
+
+    The escape searches below originally swept a fixed 16-direction,
+    4-radius grid looking for *any* untried point outside ``poly``. A grid
+    that coarse can straddle a narrow gap and report nothing even when the
+    true nearest exit is only a millimetre or two past a ray it never
+    happened to try (measured: two contacts each had a real gap 2.5-3.8mm
+    away that the grid missed entirely, dropping them for want of a finer
+    grid). Shapely's own nearest-point-on-boundary query has no such blind
+    spot -- it always finds the true closest exit if one exists.
+    """
+    from shapely.geometry import Point
+    from shapely.ops import nearest_points
+    if poly.is_empty:
+        return None
+    here = Point(x, y)
+    if not poly.contains(here):
+        return None
+    nearest = nearest_points(here, poly.boundary)[1]
+    dist = math.hypot(nearest.x - x, nearest.y - y)
+    if dist > max_reach:
+        return None
+    ux = (nearest.x - x) / dist if dist > 1e-9 else 0.0
+    uy = (nearest.y - y) / dist if dist > 1e-9 else 1.0
+    # The boundary point itself is ambiguous (on the edge), so step a little
+    # past it; if still inside (a sliver, or floating-point luck), push
+    # harder a few times before giving up.
+    for push in (dist + 0.05, dist + 0.15, dist + 0.35, dist + 0.75, dist + 1.5):
+        qx, qy = x + ux * push, y + uy * push
+        if not poly.contains(Point(qx, qy)):
+            return (qx, qy)
+    return None
+
+
 def grow_branches(
     contact_points: List[ContactPoint],
     model_slices: Sequence,
@@ -496,6 +531,9 @@ def grow_branches(
                     px, py = good_spot
                 elif field.blocked(px, py, cz):
                     if free_spot is None:
+                        free_spot = _nearest_clear_of(
+                            field.keep_out[field.index(cz)], px, py, reach)
+                    if free_spot is None:
                         skeleton.blocked_contacts += 1
                         skeleton.dropped_points.append((cp.x, cp.y, cp.z))
                         continue
@@ -541,6 +579,11 @@ def grow_branches(
                                     break
                             if px is not None:
                                 break
+                        if px is None:
+                            exact = _nearest_clear_of(
+                                field.keep_out[field.index(z_end)], cp.x, cp.y, reach)
+                            if exact is not None:
+                                px, py = exact
                 if px is not None:
                     node = skeleton.add_node(px, py, z_end, None, bed_radius,
                                              cp.layer, kind="contact")

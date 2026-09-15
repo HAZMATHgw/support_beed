@@ -266,6 +266,48 @@ def repair_support_paths(seeds, mesh, bed_z, bead_diameter, xy_clearance,
     return list(seeds) + added, len(added)
 
 
+def _climb_to_reachable_ceiling(pq, mesh, start, expected_z, bead_diameter,
+                                climb_step, max_climb=10):
+    """Climb straight up from ``start`` until the nearest downward-facing
+    surface is reachable within 45 degrees of vertical, or give up.
+
+    A straight shot at the nearest surface can lean past 45 degrees from
+    vertical when that surface sits mostly to the side of a twisty branch's
+    tip. The final connectivity check (``_graph``) discards any bead-to-bead
+    edge steeper than that as unprintable, so a correction chain built along
+    that direct line gets silently thrown out later -- the beads are placed,
+    the contact still reads as unsupported. Climbing straight up first is
+    always printable (0 degrees from vertical) and brings new geometry into
+    view; a few hops usually finds a ceiling that *is* reachable within the
+    limit.
+
+    Returns ``(climb_points, anchor, closest, distance)`` where
+    ``climb_points`` are the intermediate (x, y, z) positions climbed
+    through (empty if the start position already had a reachable surface),
+    ``anchor`` is the position the caller should measure the final approach
+    from, and ``closest``/``distance`` are its nearest-surface query result.
+    Returns ``None`` if no reachable, still-plausible surface turns up
+    within ``max_climb`` hops.
+    """
+    cur = np.asarray(start, dtype=float)
+    climb_points = []
+    for i in range(max_climb + 1):
+        closest, distance, face_idx = pq.on_surface([cur])
+        closest, distance, face_idx = closest[0], float(distance[0]), face_idx[0]
+        normal = mesh.face_normals[face_idx]
+        if normal[2] > -0.3 or abs(closest[2] - expected_z) > 3.0 * bead_diameter:
+            return None
+        d = closest - cur
+        dist = float(np.linalg.norm(d))
+        if dist < 1e-9 or math.hypot(d[0], d[1]) <= abs(d[2]) + 1e-9:
+            return climb_points, cur, closest, distance
+        if i == max_climb:
+            return None
+        cur = cur + np.array([0.0, 0.0, climb_step])
+        climb_points.append((float(cur[0]), float(cur[1]), float(cur[2])))
+    return None
+
+
 def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
                        embed=0.0, max_beads=None, bed_z=0.0):
     """Stack beads up to the real overhang surface under each leaf contact.
@@ -376,9 +418,6 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         # that is off to one side and find nothing (or the wrong thing).
         # ``on_surface`` finds the true closest point in any direction, which
         # is what the printed gap actually depends on.
-        closest, distance, face_idx = pq.on_surface([top])
-        closest, distance, face_idx = closest[0], float(distance[0]), face_idx[0]
-        normal = mesh.face_normals[face_idx]
         # Only a downward-facing surface is a ceiling this contact can hang
         # from; the closest point on a side wall or something below is not
         # what this correction is for. This does not need to match the 45
@@ -386,19 +425,31 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         # place -- detection measures the angle from stacked cross-sections,
         # not one triangle's own normal, so a genuinely overhanging spot can
         # still land on a near-vertical triangle right at that threshold.
-        # Reject only surfaces that plainly face sideways or upward.
-        if normal[2] > -0.3:
+        # Reject only surfaces that plainly face sideways or upward. Climb
+        # first if the direct line to that surface leans past 45 degrees
+        # from vertical -- see ``_climb_to_reachable_ceiling``.
+        found = _climb_to_reachable_ceiling(pq, mesh, top, expected_z,
+                                            bead_diameter, step)
+        if found is None:
             continue
-        # The intended ceiling is close to the detection sample's original
-        # height; a much farther point is unrelated geometry entirely.
-        if abs(closest[2] - expected_z) > 3.0 * bead_diameter:
-            continue
+        climb_points, anchor, closest, distance = found
         gap = distance - radius + embed
         if gap <= 1e-9:
-            resolved[t_idx] = float(top[2])
+            if climb_points:
+                # The last climbed point is meant to press into the surface
+                # by design (same as the final bead of a normal chain below)
+                # and is not checked; the ones leading up to it are.
+                leading = [(cx, cy, cz, bead_diameter) for cx, cy, cz in climb_points[:-1]]
+                if leading and not safe_path(leading):
+                    continue
+                added.extend(leading)
+                added.append((*climb_points[-1], bead_diameter))
+                resolved[t_idx] = climb_points[-1][2]
+            else:
+                resolved[t_idx] = float(top[2])
             continue
-        direction = (closest - top) / distance if distance > 1e-9 else np.array([0.0, 0.0, 1.0])
-        target = top + direction * gap
+        direction = (closest - anchor) / distance
+        target = anchor + direction * gap
         target_centre = tuple(float(v) for v in target)
         # A bead already relocated for an earlier target in this same pass
         # must not be moved again: two nearby contacts can independently pick
@@ -424,7 +475,11 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
         if gap <= step and safe_to_move and below_idx is not None:
             required = 0.98 * (radius + 0.5 * float(beads[below_idx, 3]))
             safe_to_move = np.linalg.norm(target - beads[below_idx, :3]) <= required
-        if gap <= step and safe_to_move:
+        # A climb already commits to adding new beads below this point, so
+        # relocating the original top bead on top of that no longer means
+        # "nudge it a fraction of a millimetre" -- go through the chain
+        # below instead.
+        if gap <= step and safe_to_move and not climb_points:
             # The base placement left only the usual by-design clearance
             # short of the surface. Lift that same bead into a shallow
             # embed rather than stacking a near-duplicate bead a fraction
@@ -434,15 +489,18 @@ def close_ceiling_gaps(seeds, mesh, targets, bead_diameter, xy_clearance,
             resolved[t_idx] = target_centre[2]
             continue
         count = max(1, int(math.ceil(gap / step)))
-        if len(seeds) + len(added) + count > budget:
+        if len(seeds) + len(added) + len(climb_points) + count > budget:
             continue
-        path = [(*map(float, top + direction * (gap * (i / count))), bead_diameter)
+        path = [(*map(float, anchor + direction * (gap * (i / count))), bead_diameter)
                 for i in range(1, count + 1)]
         # The last bead is meant to press into the surface by design, so
-        # only the beads leading up to it are checked for stray collisions.
+        # only the beads leading up to it (climb included) are checked for
+        # stray collisions.
         path, final = path[:-1], path[-1:]
-        if path and not safe_path(path):
+        climb_beads = [(cx, cy, cz, bead_diameter) for cx, cy, cz in climb_points]
+        if (climb_beads or path) and not safe_path(climb_beads + path):
             continue
+        added.extend(climb_beads)
         added.extend(path)
         added.extend(final)
         resolved[t_idx] = final[0][2]
